@@ -1,0 +1,360 @@
+{
+    "version":  "4.3",
+    "description":  "混合智能定位与项目别名边界提取：语义推断 + 表格结构雷达 + 首尾项目闭合 + 同义名称校验 + 多页整表重构",
+    "tables":  [
+                   {
+                       "table_id":  "SOLVENCY_MAIN",
+                       "table_name":  "偿付能力充足率指标",
+                       "section_code":  "",
+                       "title_terms":  [
+                                           "偿付能力充足率指标",
+                                           "主要偿付能力指标",
+                                           "偿付能力充足率指标表"
+                                       ],
+                       "content_terms":  [
+                                             "核心偿付能力充足率",
+                                             "综合偿付能力充足率",
+                                             "实际资本",
+                                             "最低资本"
+                                         ],
+                       "header_terms":  [
+                                            "指标名称",
+                                            "本季度末数",
+                                            "上季度末数",
+                                            "下季度末预测数"
+                                        ],
+                       "continuation_terms":  [
+                                                  "核心偿付能力充足率",
+                                                  "综合偿付能力充足率",
+                                                  "实际资本",
+                                                  "最低资本",
+                                                  "期末数",
+                                                  "预测数",
+                                                  "续表"
+                                              ],
+                       "stop_terms":  [
+                                          "流动性风险监管指标",
+                                          "流动性风险监测指标",
+                                          "主要经营指标"
+                                      ],
+                       "minimum_score":  8,
+                       "anchor_min_structure_hits":  2,
+                       "max_pages":  3,
+                       "include_continuation":  true,
+                       "continuation_min_structure_hits":  2,
+                       "continuation_min_numeric_lines":  2,
+                       "continuation_min_score":  5,
+                       "continuation_generic_numeric_lines":  3,
+                       "terminal_terms":  [
+                                              "综合偿付能力充足率",
+                                              "综合偿付充足率"
+                                          ],
+                       "allow_single_row_tail":  true,
+                       "continuation_width_tolerance":  1,
+                       "start_item_terms":  [
+                                                "认可资产",
+                                                "认可资产合计"
+                                            ],
+                       "end_item_terms":  [
+                                              "综合偿付能力充足率",
+                                              "综合偿付充足率"
+                                          ],
+                       "exclude_item_terms":  [
+
+                                              ]
+                   },
+                   {
+                       "table_id":  "OPERATING_METRICS",
+                       "table_name":  "主要经营指标",
+                       "section_code":  "",
+                       "title_terms":  [
+                                           "主要经营指标",
+                                           "主要经营情况"
+                                       ],
+                       "content_terms":  [
+                                             "保险业务收入",
+                                             "净利润",
+                                             "总资产",
+                                             "净资产",
+                                             "签单保费",
+                                             "新业务价值",
+                                             "效益类指标",
+                                             "规模类指标",
+                                             "品质类指标",
+                                             "综合退保率",
+                                             "营销员脱落率",
+                                             "个人营销员脱落率",
+                                             "代理人脱落率",
+                                             "营销员流失率"
+                                         ],
+                       "header_terms":  [
+                                            "指标名称",
+                                            "本季度数",
+                                            "本季度（末）数",
+                                            "本季度末数",
+                                            "本年累计数"
+                                        ],
+                       "continuation_terms":  [
+                                                  "主要经营指标",
+                                                  "效益类指标",
+                                                  "规模类指标",
+                                                  "品质类指标",
+                                                  "保险业务收入",
+                                                  "净利润",
+                                                  "总资产",
+                                                  "净资产",
+                                                  "签单保费",
+                                                  "综合退保率",
+                                                  "期末数",
+                                                  "累计数",
+                                                  "续表",
+                                                  "营销员脱落率",
+                                                  "个人营销员脱落率",
+                                                  "代理人脱落率",
+                                                  "营销员流失率"
+                                              ],
+                       "stop_terms":  [
+                                          "流动性风险监管指标",
+                                          "流动性风险监测指标",
+                                          "近三年综合投资收益率",
+                                          "近三年（综合）投资收益率"
+                                      ],
+                       "minimum_score":  8,
+                       "anchor_min_structure_hits":  2,
+                       "max_pages":  5,
+                       "include_continuation":  true,
+                       "continuation_min_structure_hits":  2,
+                       "continuation_min_numeric_lines":  2,
+                       "continuation_min_score":  5,
+                       "continuation_generic_numeric_lines":  3,
+                       "terminal_terms":  [
+                                              "营销员脱落率",
+                                              "个人营销员脱落率",
+                                              "代理人脱落率",
+                                              "营销员流失率"
+                                          ],
+                       "allow_single_row_tail":  true,
+                       "continuation_width_tolerance":  1,
+                       "start_item_terms":  [
+                                                "保险业务收入",
+                                                "保险业务收入合计"
+                                            ],
+                       "end_item_terms":  [
+                                              "营销员脱落率",
+                                              "个人营销员脱落率",
+                                              "代理人脱落率",
+                                              "营销员流失率"
+                                          ],
+                       "exclude_item_terms":  [
+                                                  "前五大产品的信息"
+                                              ]
+                   },
+                   {
+                       "table_id":  "ACTUAL_CAPITAL",
+                       "table_name":  "S02-实际资本明细表",
+                       "section_code":  "S02",
+                       "title_terms":  [
+                                           "S02-实际资本明细表",
+                                           "S02实际资本明细表",
+                                           "实际资本明细表",
+                                           "实际资本表"
+                                       ],
+                       "content_terms":  [
+                                             "核心一级资本",
+                                             "核心二级资本",
+                                             "附属一级资本",
+                                             "附属二级资本",
+                                             "实际资本合计"
+                                         ],
+                       "header_terms":  [
+                                            "行次",
+                                            "期末数",
+                                            "期初数"
+                                        ],
+                       "continuation_terms":  [
+                                                  "核心一级资本",
+                                                  "核心二级资本",
+                                                  "附属一级资本",
+                                                  "附属二级资本",
+                                                  "实际资本合计",
+                                                  "行次",
+                                                  "期末数",
+                                                  "期初数",
+                                                  "续表"
+                                              ],
+                       "stop_terms":  [
+                                          "S03",
+                                          "认可资产表",
+                                          "认可负债表",
+                                          "S04",
+                                          "S05"
+                                      ],
+                       "minimum_score":  8,
+                       "anchor_min_structure_hits":  2,
+                       "max_pages":  4,
+                       "include_continuation":  true,
+                       "continuation_min_structure_hits":  2,
+                       "continuation_min_numeric_lines":  2,
+                       "continuation_min_score":  5,
+                       "continuation_generic_numeric_lines":  3,
+                       "terminal_terms":  [
+                                              "实际资本合计",
+                                              "实际资本总额",
+                                              "实际资本"
+                                          ],
+                       "allow_single_row_tail":  true,
+                       "continuation_width_tolerance":  1,
+                       "start_item_terms":  [
+                                                "核心一级资本",
+                                                "核心一级资本合计"
+                                            ],
+                       "end_item_terms":  [
+                                              "实际资本合计",
+                                              "实际资本总额",
+                                              "实际资本"
+                                          ],
+                       "exclude_item_terms":  [
+
+                                              ]
+                   },
+                   {
+                       "table_id":  "THREE_YEAR_INVESTMENT_RETURN",
+                       "table_name":  "近三年（综合）投资收益率",
+                       "section_code":  "",
+                       "title_terms":  [
+                                           "近三年综合投资收益率",
+                                           "近三年平均综合投资收益率",
+                                           "近三年（综合）投资收益率"
+                                       ],
+                       "content_terms":  [
+                                             "近三年平均投资收益率",
+                                             "近三年平均综合投资收益率",
+                                             "近三年投资收益率",
+                                             "近三年综合投资收益率",
+                                             "投资收益率",
+                                             "综合投资收益率"
+                                         ],
+                       "header_terms":  [
+                                            "本季度",
+                                            "本年累计",
+                                            "上年",
+                                            "平均"
+                                        ],
+                       "continuation_terms":  [
+                                                  "近三年平均投资收益率",
+                                                  "近三年平均综合投资收益率",
+                                                  "近三年投资收益率",
+                                                  "近三年综合投资收益率",
+                                                  "投资收益率",
+                                                  "综合投资收益率",
+                                                  "续表"
+                                              ],
+                       "stop_terms":  [
+                                          "实际资本表",
+                                          "实际资本明细表",
+                                          "S02",
+                                          "最低资本表",
+                                          "S05"
+                                      ],
+                       "minimum_score":  8,
+                       "anchor_min_structure_hits":  1,
+                       "max_pages":  2,
+                       "include_continuation":  true,
+                       "continuation_min_structure_hits":  2,
+                       "continuation_min_numeric_lines":  2,
+                       "continuation_min_score":  5,
+                       "continuation_generic_numeric_lines":  3,
+                       "terminal_terms":  [
+                                              "近三年平均综合投资收益率",
+                                              "近三年综合投资收益率",
+                                              "综合投资收益率"
+                                          ],
+                       "allow_single_row_tail":  true,
+                       "continuation_width_tolerance":  1,
+                       "start_item_terms":  [
+                                                "近三年平均投资收益率",
+                                                "近三年投资收益率",
+                                                "投资收益率"
+                                            ],
+                       "end_item_terms":  [
+                                              "近三年平均综合投资收益率",
+                                              "近三年综合投资收益率",
+                                              "综合投资收益率"
+                                          ],
+                       "exclude_item_terms":  [
+
+                                              ]
+                   },
+                   {
+                       "table_id":  "MINIMUM_CAPITAL",
+                       "table_name":  "S05-最低资本表",
+                       "section_code":  "S05",
+                       "title_terms":  [
+                                           "S05-最低资本表",
+                                           "S05最低资本表",
+                                           "最低资本表",
+                                           "最低资本明细表"
+                                       ],
+                       "content_terms":  [
+                                             "量化风险最低资本",
+                                             "市场风险最低资本",
+                                             "信用风险最低资本",
+                                             "保险风险最低资本",
+                                             "控制风险最低资本",
+                                             "附加资本",
+                                             "最低资本合计"
+                                         ],
+                       "header_terms":  [
+                                            "行次",
+                                            "期末数",
+                                            "期初数"
+                                        ],
+                       "continuation_terms":  [
+                                                  "量化风险最低资本",
+                                                  "市场风险最低资本",
+                                                  "信用风险最低资本",
+                                                  "保险风险最低资本",
+                                                  "控制风险最低资本",
+                                                  "附加资本",
+                                                  "最低资本合计",
+                                                  "行次",
+                                                  "期末数",
+                                                  "期初数",
+                                                  "续表"
+                                              ],
+                       "stop_terms":  [
+                                          "S06",
+                                          "风险综合评级",
+                                          "偿付能力风险管理评估",
+                                          "风险管理能力"
+                                      ],
+                       "minimum_score":  8,
+                       "anchor_min_structure_hits":  2,
+                       "max_pages":  4,
+                       "include_continuation":  true,
+                       "continuation_min_structure_hits":  2,
+                       "continuation_min_numeric_lines":  2,
+                       "continuation_min_score":  5,
+                       "continuation_generic_numeric_lines":  3,
+                       "terminal_terms":  [
+                                              "最低资本",
+                                              "最低资本合计",
+                                              "最低资本总额"
+                                          ],
+                       "allow_single_row_tail":  true,
+                       "continuation_width_tolerance":  1,
+                       "start_item_terms":  [
+                                                "量化风险最低资本",
+                                                "量化风险最低资本合计"
+                                            ],
+                       "end_item_terms":  [
+                                              "最低资本",
+                                              "最低资本合计",
+                                              "最低资本总额"
+                                          ],
+                       "exclude_item_terms":  [
+
+                                              ]
+                   }
+               ]
+}

@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Credentials and local environment
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+*credential*
+
+# Notebook and editor state
+.ipynb_checkpoints/
+.vscode/
+.idea/
+
+# Runtime outputs and uploaded reports
+Download/
+uploads/
+tmp/
+*.log
+
+# Operating system files
+.DS_Store
+Thumbs.db
