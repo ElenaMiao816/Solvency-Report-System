@@ -373,6 +373,10 @@ def _pipe_prompt(table_id: str, table_name: str, page_number: int, retry_reason:
         )
 
     retry_note = f"上一轮失败原因：{retry_reason}\n请逐行重新核对。" if retry_reason else ""
+    unit_note = (
+        "\u82e5\u539f\u9875\u8868\u683c\u4e0a\u65b9\u6216\u8868\u5934\u6807\u6709\u7edf\u4e00\u5355\u4f4d\uff0c\u5fc5\u987b\u628a\u5355\u4f4d\u9644\u52a0\u5230\u76f8\u5e94\u6570\u503c\u5217\u8868\u5934\u4e2d\uff0c"
+        "\u4f8b\u5982\u201c\u671f\u672b\u6570\uff08\u5143\uff09\u201d\uff1b\u9879\u76ee\u540d\u81ea\u5e26\u5355\u4f4d\u6309\u539f\u6587\u4fdd\u7559\uff0c\u4e0d\u5f97\u628a\u5355\u4f4d\u8bf4\u660e\u4f5c\u4e3a\u6570\u636e\u884c\u3002"
+    )
     return f"""你是四大会计师事务所的偿付能力报告数字化审阅专家。
 当前任务：只提取PDF物理第{page_number}页中属于【{table_name}】的表格内容。
 
@@ -383,6 +387,7 @@ def _pipe_prompt(table_id: str, table_name: str, page_number: int, retry_reason:
 {operating_note}
 {retry_note}
 
+{unit_note}
 【必须遵守】
 1. 这是逐页任务。即使本页是续页、没有表名、只有最后一条数据，也必须提取该条数据。
 2. 如果本页下方开始下一张表，只提取边界之前属于目标表的内容。
@@ -863,6 +868,7 @@ def extract_tables_hybrid(
                 quality_score=min(quality, sum(page_scores.values()) / len(page_scores)),
                 evidence=f"{evidence}；{boundary_note}；逐页提取成功后按物理页码{pages}拼接",
                 source_pages=pages,
+                unit_records=extract_unit_records(match.table_id, merged_rows, grids),
             ))
             add_log(ExtractionLog(
                 match.table_id, match.table_name, pages, CROSS_PAGE_MERGE_MODE, "成功",

@@ -31,6 +31,7 @@ from .solvency_table_extractor import (
     TABLE_SIGNATURES,
     TABLE_START_MARKERS,
     ExtractedTable,
+    UnitRecord,
 )
 
 GRID_COLUMNS = 180
@@ -108,6 +109,168 @@ def _clean(value) -> str:
 def _compact(value: str) -> str:
     return re.sub(r"[\s：:（）()、，,。·—\-_/]", "", str(value or ""))
 
+_UNIT_TOKEN = (
+    r"(?:\u4eba\u6c11\u5e01\s*)?"
+    r"(?:\u4ebf\u5143|\u4e07\u5143|\u5343\u5143|\u5143|%|\uff05|"
+    r"\u767e\u5206\u6bd4|\u767e\u5206\u70b9|\u4eba|\u6237|\u4ef6|\u6b21|\u7ea7)"
+)
+_UNIT_DECLARATION_RE = re.compile(
+    rf"(?:\u91d1\u989d)?\u5355\u4f4d\s*(?:[\uff1a:]\s*)?(?P<unit>{_UNIT_TOKEN})",
+    flags=re.I,
+)
+_UNIT_PAREN_RE = re.compile(
+    rf"[\uff08(]\s*(?P<unit>{_UNIT_TOKEN})\s*[\uff09)]",
+    flags=re.I,
+)
+
+
+def _normalize_unit(value: str) -> str:
+    text = re.sub(r"[\s\uff1a:\uff08\uff09()]", "", str(value or ""))
+    text = text.replace("\uff05", "%")
+    if "\u767e\u5206\u6bd4" in text:
+        return "%"
+    if "\u767e\u5206\u70b9" in text:
+        return "\u767e\u5206\u70b9"
+    for unit in (
+        "\u4ebf\u5143", "\u4e07\u5143", "\u5343\u5143", "\u5143", "%",
+        "\u4eba", "\u6237", "\u4ef6", "\u6b21", "\u7ea7",
+    ):
+        if text.endswith(unit):
+            return unit
+    return text
+
+
+def _unit_raw(value: str) -> str:
+    text = re.sub(r"\s+", "", str(value or "")).strip("\uff1a:")
+    return text or str(value or "").strip()
+
+
+def _line_content(line: str) -> str:
+    return str(line or "").partition("|")[2] if "|" in str(line or "") else str(line or "")
+
+
+def _unit_from_label(
+    label: str,
+    *,
+    scope: str,
+    target: str,
+    source_page: int,
+    source_type: str,
+) -> list[UnitRecord]:
+    records: list[UnitRecord] = []
+    for match in _UNIT_PAREN_RE.finditer(str(label or "")):
+        raw = _unit_raw(match.group("unit"))
+        records.append(UnitRecord(
+            scope=scope,
+            target=target,
+            raw_unit=raw,
+            normalized_unit=_normalize_unit(raw),
+            source_page=source_page,
+            source_type=source_type,
+            source_text=str(label or "").strip(),
+            confidence="\u9ad8",
+        ))
+    return records
+
+
+def _unit_records_from_grid(
+    table_id: str,
+    page_number: int,
+    grid_text: str,
+) -> list[UnitRecord]:
+    lines = str(grid_text or "").splitlines()
+    if not lines:
+        return []
+    sliced_lines = _slice_grid_for_target(table_id, grid_text).splitlines()
+    if not sliced_lines:
+        return []
+    first = next((index for index, line in enumerate(lines) if line == sliced_lines[0]), 0)
+    # Standalone unit labels normally sit between the table title and its header.
+    context_start = max(0, first - 6)
+    context_end = min(len(lines), first + 7)
+    records: list[UnitRecord] = []
+    for line in lines[context_start:context_end]:
+        content = _line_content(line).strip()
+        for match in _UNIT_DECLARATION_RE.finditer(content):
+            raw = _unit_raw(match.group("unit"))
+            records.append(UnitRecord(
+                scope="\u8868\u7ea7",
+                target="",
+                raw_unit=raw,
+                normalized_unit=_normalize_unit(raw),
+                source_page=page_number,
+                source_type="\u8868\u683c\u4e0a\u65b9\u6807\u6ce8",
+                source_text=content,
+                confidence="\u9ad8",
+            ))
+    return records
+
+
+def extract_unit_records(
+    table_id: str,
+    rows: list[list[str]],
+    source_grids: list[PageGrid] | None = None,
+) -> list[UnitRecord]:
+    records: list[UnitRecord] = []
+    for grid in source_grids or []:
+        records.extend(_unit_records_from_grid(table_id, grid.page_number, grid.grid_text))
+
+    first_grid = next(iter(source_grids or []), None)
+    source_page_number = first_grid.page_number if first_grid else 0
+    if rows:
+        for cell in rows[0]:
+            text = _clean(cell)
+            records.extend(_unit_from_label(
+                text,
+                scope="\u5217\u7ea7",
+                target=text,
+                source_page=source_page_number,
+                source_type="\u8868\u5934\u9644\u5e26\u5355\u4f4d",
+            ))
+        for row in rows[1:]:
+            if not row:
+                continue
+            label_index = (
+                1
+                if len(row) > 1 and re.fullmatch(r"\d+(?:\.\d+)*\*?", row[0].strip())
+                else 0
+            )
+            label = _clean(row[label_index] if label_index < len(row) else "")
+            if label:
+                records.extend(_unit_from_label(
+                    label,
+                    scope="\u884c\u7ea7",
+                    target=label,
+                    source_page=source_page_number,
+                    source_type="\u9879\u76ee\u540d\u79f0\u9644\u5e26\u5355\u4f4d",
+                ))
+            value_cells = row[label_index + 1:]
+            has_percent = any(
+                re.search(r"(?:%|\uff05)\s*$", cell.strip())
+                for cell in value_cells
+                if cell.strip()
+            )
+            if label and has_percent:
+                records.append(UnitRecord(
+                    scope="\u884c\u7ea7",
+                    target=label,
+                    raw_unit="%",
+                    normalized_unit="%",
+                    source_page=source_page_number,
+                    source_type="\u6570\u503c\u683c\u5f0f",
+                    source_text="\uff1b".join(
+                        cell.strip() for cell in value_cells if cell.strip()
+                    ),
+                    confidence="\u9ad8",
+                ))
+    unique: list[UnitRecord] = []
+    seen: set[tuple] = set()
+    for record in records:
+        key = record.dedupe_key()
+        if key not in seen:
+            seen.add(key)
+            unique.append(record)
+    return unique
 
 def _group_matches(matches: list[PageMatch]) -> list[tuple[str, str, list[int]]]:
     grouped: dict[str, dict] = {}
@@ -640,6 +803,7 @@ def _reconstruct(
         table_id=table_id, table_name=table_name, page=pages[0], table_index=1,
         rows=rows, strategy=mode, quality_score=score, evidence=evidence,
         source_pages=pages,
+        unit_records=extract_unit_records(table_id, rows, source_grids),
     )
 
 
@@ -778,6 +942,13 @@ def reconstructed_workbook_bytes(bundle: AIExtractionBundle) -> bytes:
     used: set[str] = {"提取日志"}
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         extraction_logs_frame(bundle.logs).to_excel(writer, sheet_name="提取日志", index=False)
+        unit_frames = [
+            table.units_frame() for table in bundle.tables if table.unit_records
+        ]
+        if unit_frames:
+            unit_sheet = "\u5355\u4f4d\u4fe1\u606f"
+            pd.concat(unit_frames, ignore_index=True).to_excel(writer, sheet_name=unit_sheet, index=False)
+            used.add(unit_sheet)
         for table in bundle.tables:
             pages = table.source_pages or [table.page]
             page_label = str(pages[0]) if len(pages) == 1 else f"{pages[0]}-{pages[-1]}"
@@ -787,15 +958,22 @@ def reconstructed_workbook_bytes(bundle: AIExtractionBundle) -> bytes:
                 suffix += 1
                 name = f"{base[:27]}_{suffix}"
             used.add(name)
-            table.to_frame().to_excel(writer, sheet_name=name, index=False, header=False)
+            table.to_frame(include_unit_footer=True).to_excel(writer, sheet_name=name, index=False, header=False)
 
         fill = PatternFill("solid", fgColor="00338D")
         font = Font(color="FFFFFF", bold=True)
+        unit_fill = PatternFill("solid", fgColor="FFF2CC")
+        unit_footer_label = "\u3010\u5355\u4f4d\u5907\u6ce8\u3011"
         for sheet in writer.book.worksheets:
             sheet.freeze_panes = "A2"
             for cell in sheet[1]:
                 cell.fill, cell.font = fill, font
                 cell.alignment = Alignment(horizontal="center", vertical="center")
+            for row in sheet.iter_rows():
+                if row and row[0].value == unit_footer_label:
+                    for cell in row:
+                        cell.fill = unit_fill
+                        cell.alignment = Alignment(vertical="top", wrap_text=True)
             for index, cells in enumerate(sheet.iter_cols(1, sheet.max_column), start=1):
                 length = max((len(str(cell.value or "")) for cell in cells), default=8)
                 sheet.column_dimensions[get_column_letter(index)].width = min(max(length + 2, 10), 42)
