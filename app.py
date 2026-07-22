@@ -756,7 +756,7 @@ with tabs[2]:
         table_col, pdf_col = st.columns([1.15, 1], gap="large")
         with table_col:
             st.markdown("##### 网格化重构结果")
-            st.dataframe(selected_table.to_frame(), width="stretch", hide_index=True)
+            st.dataframe(selected_table.to_frame(include_unit_footer=True), width="stretch", hide_index=True)
         with pdf_col:
             selected_source_page = st.selectbox(
                 "PDF原页核实",

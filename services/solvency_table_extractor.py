@@ -64,6 +64,43 @@ TABLE_END_MARKERS = {
 
 
 @dataclass
+class UnitRecord:
+    """A unit declaration found in or immediately around an extracted table."""
+
+    scope: str
+    target: str
+    raw_unit: str
+    normalized_unit: str
+    source_page: int = 0
+    source_type: str = ""
+    source_text: str = ""
+    confidence: str = "\u9ad8"
+
+    def dedupe_key(self) -> tuple:
+        return (
+            self.scope,
+            self.target,
+            self.normalized_unit,
+            self.source_page,
+            self.source_type,
+            self.source_text,
+        )
+
+    def to_dict(self, table_name: str = "") -> dict:
+        return {
+            "\u76ee\u6807\u8868": table_name,
+            "\u7269\u7406\u9875\u7801": self.source_page,
+            "\u4f5c\u7528\u8303\u56f4": self.scope,
+            "\u5bf9\u8c61": self.target,
+            "\u539f\u59cb\u5355\u4f4d": self.raw_unit,
+            "\u89c4\u8303\u5355\u4f4d": self.normalized_unit,
+            "\u6765\u6e90\u7c7b\u578b": self.source_type,
+            "\u6765\u6e90\u539f\u6587": self.source_text,
+            "\u7f6e\u4fe1\u5ea6": self.confidence,
+        }
+
+
+@dataclass
 class ExtractedTable:
     table_id: str
     table_name: str
@@ -74,6 +111,7 @@ class ExtractedTable:
     quality_score: float = 0.0
     evidence: str = ""
     source_pages: list[int] = field(default_factory=list)
+    unit_records: list[UnitRecord] = field(default_factory=list)
 
     @property
     def candidate_id(self) -> str:
@@ -81,9 +119,41 @@ class ExtractedTable:
         return f"{self.table_id}:{pages}:{self.strategy}:{self.table_index}"
 
 
-    def to_frame(self) -> pd.DataFrame:
+    def unit_summary(self) -> str:
+        if not self.unit_records:
+            return "\u672a\u8bc6\u522b\u5230\u660e\u786e\u5355\u4f4d\uff0c\u8bf7\u6838\u5bf9PDF\u539f\u9875\u3002"
+        grouped: dict[tuple[str, str], list[UnitRecord]] = {}
+        for record in self.unit_records:
+            grouped.setdefault((record.scope, record.target), []).append(record)
+        parts: list[str] = []
+        for (scope, target), records in grouped.items():
+            units = "/".join(dict.fromkeys(item.normalized_unit for item in records))
+            pages = "/".join(
+                dict.fromkeys(str(item.source_page) for item in records if item.source_page)
+            )
+            page_note = f"\uff0c\u7b2c{pages}\u9875" if pages else ""
+            target_note = f"{target}\uff1a" if target else ""
+            parts.append(f"{scope}{target_note}{units}{page_note}")
+        return "\uff1b".join(parts)
+
+    def units_frame(self) -> pd.DataFrame:
+        columns = [
+            "\u76ee\u6807\u8868", "\u7269\u7406\u9875\u7801", "\u4f5c\u7528\u8303\u56f4", "\u5bf9\u8c61", "\u539f\u59cb\u5355\u4f4d", "\u89c4\u8303\u5355\u4f4d",
+            "\u6765\u6e90\u7c7b\u578b", "\u6765\u6e90\u539f\u6587", "\u7f6e\u4fe1\u5ea6",
+        ]
+        return pd.DataFrame(
+            [record.to_dict(self.table_name) for record in self.unit_records],
+            columns=columns,
+        )
+
+    def to_frame(self, *, include_unit_footer: bool = False) -> pd.DataFrame:
         width = max((len(row) for row in self.rows), default=0)
         padded = [row + [""] * (width - len(row)) for row in self.rows]
+        if include_unit_footer:
+            width = max(width, 2)
+            padded = [row + [""] * (width - len(row)) for row in padded]
+            footer = ["\u3010\u5355\u4f4d\u5907\u6ce8\u3011", self.unit_summary()]
+            padded.append(footer + [""] * (width - len(footer)))
         return pd.DataFrame(padded)
 
 
