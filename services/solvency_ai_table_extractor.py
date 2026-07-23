@@ -15,6 +15,9 @@ import requests
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from .llm_config import model_request_parameters, normalize_model_id
+from .llm_http import post_json_with_retry
+from .solvency_disclosure_normalizer import normalize_three_year_return_rows
 from .solvency_pdf_locator import PageMatch
 from .solvency_table_boundaries import (
     TABLE_ITEM_BOUNDARIES,
@@ -122,6 +125,13 @@ _UNIT_PAREN_RE = re.compile(
     rf"[\uff08(]\s*(?P<unit>{_UNIT_TOKEN})\s*[\uff09)]",
     flags=re.I,
 )
+_SUPPORTED_UNITS = {
+    "\u4ebf\u5143", "\u4e07\u5143", "\u5343\u5143", "\u5143", "%",
+    "\u767e\u5206\u70b9", "\u4eba", "\u6237", "\u4ef6", "\u6b21", "\u7ea7",
+}
+_PERCENT_LABEL_TERMS = (
+    "\u7387", "\u6bd4\u4f8b", "\u5360\u6bd4", "\u589e\u901f", "\u589e\u957f",
+)
 
 
 def _normalize_unit(value: str) -> str:
@@ -143,6 +153,253 @@ def _normalize_unit(value: str) -> str:
 def _unit_raw(value: str) -> str:
     text = re.sub(r"\s+", "", str(value or "")).strip("\uff1a:")
     return text or str(value or "").strip()
+
+
+def _unit_target_key(value: str) -> str:
+    text = _UNIT_PAREN_RE.sub("", str(value or ""))
+    normalized = _normalize_unit(text)
+    if normalized in _SUPPORTED_UNITS:
+        text = re.sub(
+            rf"(?:{_UNIT_TOKEN})\s*$",
+            "",
+            text,
+            flags=re.I,
+        )
+    return _compact(text)
+
+
+def _row_label_index(row: list[str]) -> int:
+    return (
+        1
+        if len(row) > 1 and re.fullmatch(r"\d+(?:\.\d+)*\*?", row[0].strip())
+        else 0
+    )
+
+
+def _row_label(row: list[str]) -> str:
+    if not row:
+        return ""
+    label_index = _row_label_index(row)
+    return _clean(row[label_index] if label_index < len(row) else "")
+
+
+def merge_unit_records(*groups: list[UnitRecord]) -> list[UnitRecord]:
+    unique: list[UnitRecord] = []
+    seen: set[tuple] = set()
+    for records in groups:
+        for record in records:
+            key = record.dedupe_key()
+            if key not in seen:
+                seen.add(key)
+                unique.append(record)
+    return unique
+
+
+def _resolve_unit_target(
+    scope: str,
+    target: str,
+    rows: list[list[str]],
+) -> str | None:
+    if scope == "\u8868\u7ea7":
+        return ""
+    candidates = (
+        [_clean(cell) for cell in rows[0] if _clean(cell)]
+        if scope == "\u5217\u7ea7" and rows
+        else [_row_label(row) for row in rows[1:]]
+    )
+    candidates = [candidate for candidate in candidates if candidate]
+    target_key = _unit_target_key(target)
+    if not target_key:
+        return None
+    exact = next(
+        (
+            candidate
+            for candidate in candidates
+            if _unit_target_key(candidate) == target_key
+        ),
+        None,
+    )
+    if exact:
+        return exact
+    contained = [
+        candidate
+        for candidate in candidates
+        if (
+            target_key in _unit_target_key(candidate)
+            or _unit_target_key(candidate) in target_key
+        )
+    ]
+    if not contained:
+        return None
+    return min(
+        contained,
+        key=lambda candidate: abs(len(_unit_target_key(candidate)) - len(target_key)),
+    )
+
+
+def unit_records_from_payload(
+    payload: dict,
+    rows: list[list[str]],
+    pages: list[int],
+    *,
+    source_type: str = "\u56fe\u7247\u7ed3\u6784\u5316\u5355\u4f4d",
+) -> list[UnitRecord]:
+    raw_records = payload.get("unit_records", payload.get("units", []))
+    if not isinstance(raw_records, list):
+        return []
+    page_set = set(pages)
+    default_page = pages[0] if pages else 0
+    scope_aliases = {
+        "\u8868": "\u8868\u7ea7",
+        "\u8868\u7ea7": "\u8868\u7ea7",
+        "table": "\u8868\u7ea7",
+        "\u5217": "\u5217\u7ea7",
+        "\u5217\u7ea7": "\u5217\u7ea7",
+        "column": "\u5217\u7ea7",
+        "\u884c": "\u884c\u7ea7",
+        "\u884c\u7ea7": "\u884c\u7ea7",
+        "row": "\u884c\u7ea7",
+    }
+    records: list[UnitRecord] = []
+    for item in raw_records:
+        if not isinstance(item, dict):
+            continue
+        scope = scope_aliases.get(
+            str(item.get("scope", item.get("\u4f5c\u7528\u8303\u56f4", ""))).strip().lower()
+        )
+        if not scope:
+            continue
+        raw = _unit_raw(
+            item.get(
+                "raw_unit",
+                item.get(
+                    "unit",
+                    item.get("\u539f\u59cb\u5355\u4f4d", item.get("normalized_unit", "")),
+                ),
+            )
+        )
+        normalized = _normalize_unit(raw)
+        if normalized not in _SUPPORTED_UNITS:
+            continue
+        target = str(
+            item.get("target", item.get("\u5bf9\u8c61", item.get("label", ""))) or ""
+        ).strip()
+        resolved_target = _resolve_unit_target(scope, target, rows)
+        if resolved_target is None:
+            continue
+        try:
+            source_page = int(
+                item.get("source_page", item.get("\u7269\u7406\u9875\u7801", default_page))
+                or default_page
+            )
+        except (TypeError, ValueError):
+            source_page = default_page
+        if page_set and source_page not in page_set:
+            source_page = default_page
+        records.append(UnitRecord(
+            scope=scope,
+            target=resolved_target,
+            raw_unit=raw,
+            normalized_unit=normalized,
+            source_page=source_page,
+            source_type=source_type,
+            source_text=str(
+                item.get("source_text", item.get("\u6765\u6e90\u539f\u6587", "")) or ""
+            ).strip(),
+            confidence=str(
+                item.get("confidence", item.get("\u7f6e\u4fe1\u5ea6", "\u9ad8")) or "\u9ad8"
+            ).strip(),
+        ))
+    return merge_unit_records(records)
+
+
+def unit_recovery_needed(
+    rows: list[list[str]],
+    records: list[UnitRecord],
+) -> bool:
+    if len(rows) < 2:
+        return False
+    table_units = {
+        record.normalized_unit for record in records if record.scope == "\u8868\u7ea7"
+    }
+    column_units = {
+        record.normalized_unit for record in records if record.scope == "\u5217\u7ea7"
+    }
+    for row in rows[1:]:
+        label = _row_label(row)
+        if not label:
+            continue
+        label_index = _row_label_index(row)
+        value_cells = row[label_index + 1:]
+        if not any(re.search(r"\d", cell) for cell in value_cells):
+            continue
+        row_key = _unit_target_key(label)
+        available = {
+            record.normalized_unit
+            for record in records
+            if (
+                record.scope == "\u884c\u7ea7"
+                and _unit_target_key(record.target) == row_key
+            )
+        }
+        available.update(table_units)
+        available.update(column_units)
+        expects_percent = any(term in label for term in _PERCENT_LABEL_TERMS)
+        if expects_percent:
+            if "%" not in available and "\u767e\u5206\u70b9" not in available:
+                return True
+        elif not available:
+            return True
+    return False
+
+
+def _unit_vision_messages(
+    table_id: str,
+    table_name: str,
+    pages: list[int],
+    rows: list[list[str]],
+    images: list[tuple[int, str]],
+) -> list[dict]:
+    columns = rows[0] if rows else []
+    row_targets = [_row_label(row) for row in rows[1:] if _row_label(row)]
+    prompt = f"""你是保险公司偿付能力报告单位核对专家。
+目标表ID：{table_id}
+目标表名称：{table_name}
+PDF物理页码：{pages}
+
+系统已经提取的列名：
+{json.dumps(columns, ensure_ascii=False)}
+系统已经提取的项目名：
+{json.dumps(row_targets, ensure_ascii=False)}
+
+请只读取随后页面图片中明确出现的单位，不得依据数值大小、行业惯例或项目含义猜测。
+1. 表格上方统一单位使用scope="表级"，target=""。
+2. 表头单位使用scope="列级"，target必须从上述列名中原样选择。
+3. 项目名内单位使用scope="行级"，target必须从上述项目名中原样选择；即使图片原文项目名与系统项目名略有差异，也要映射到系统项目名。
+4. source_text必须保留图片中实际看到的含单位原文，例如“实际资本（元）”。
+5. 支持的单位：亿元、万元、千元、元、%、百分点、人、户、件、次、级。
+6. 图片中没有明确单位时不要输出该记录。
+7. 只输出JSON对象，不输出Markdown或解释文字。
+
+JSON格式：
+{{"unit_records":[
+  {{"scope":"行级","target":"实际资本合计","raw_unit":"元",
+    "source_page":8,"source_text":"实际资本（元）","confidence":"高"}}
+]}}
+"""
+    content: list[dict] = [{"type": "text", "text": prompt}]
+    for page_number, data_url in images:
+        content.extend([
+            {"type": "text", "text": f"PDF物理第 {page_number} 页"},
+            {"type": "image_url", "image_url": {"url": data_url, "detail": "high"}},
+        ])
+    return [
+        {
+            "role": "system",
+            "content": "\u4f60\u53ea\u8d1f\u8d23\u4ece\u9875\u9762\u56fe\u7247\u4e2d\u6284\u5f55\u660e\u786e\u5355\u4f4d\uff0c\u4e0d\u5f97\u63a8\u65ad\u5355\u4f4d\u3002",
+        },
+        {"role": "user", "content": content},
+    ]
 
 
 def _line_content(line: str) -> str:
@@ -263,14 +520,7 @@ def extract_unit_records(
                     ),
                     confidence="\u9ad8",
                 ))
-    unique: list[UnitRecord] = []
-    seen: set[tuple] = set()
-    for record in records:
-        key = record.dedupe_key()
-        if key not in seen:
-            seen.add(key)
-            unique.append(record)
-    return unique
+    return merge_unit_records(records)
 
 def _group_matches(matches: list[PageMatch]) -> list[tuple[str, str, list[int]]]:
     grouped: dict[str, dict] = {}
@@ -341,10 +591,18 @@ def _instructions(table_id: str, table_name: str, pages: list[int]) -> str:
     scope_note = ""
     if table_id == "OPERATING_METRICS":
         scope_note = (
-            "本目标是组合经营指标。无论原报告合并成一张表，还是拆分为主要经营指标、"
-            "效益类指标、规模类指标、品质类指标四张相邻表，都必须全部提取并按原顺序合并。"
-            "综合退保率属于品质类指标时必须保留。分类标题可作为无数值分组行保留，"
-            "不得因为表名不同而遗漏后三类指标。"
+            "本目标是组合经营指标，按原报告实际披露的项目提取并按原顺序合并。"
+            "报告可能只披露主要经营指标至‘综合投资收益率’，若后续效益类、规模类、品质类指标未出现，"
+            "应以‘综合投资收益率’作为实际终点并完整保留已披露内容。"
+            "如果原文继续披露后三类指标，则必须继续提取至最后的‘营销员脱落率’（或其同义名称）。"
+            "不得补造未披露的指标，也不得因存在备用终点而提前截断。"
+        )
+    elif table_id == "THREE_YEAR_INVESTMENT_RETURN":
+        scope_note = (
+            "原报告可能使用两行表格、双列版式，或一句话同时披露两个数值。"
+            "无论版式如何，输出必须固定为两行："
+            "‘近三年平均投资收益率’和‘近三年平均综合投资收益率’，每行只保留对应数值。"
+            "不得把普通投资收益率与综合投资收益率的数值互换。"
         )
     return f"""
 目标表ID：{table_id}
@@ -363,12 +621,19 @@ def _instructions(table_id: str, table_name: str, pages: list[int]) -> str:
 3. 修复合并单元格造成的字段拆分，但不得推测或编造数值。
 4. 每行必须和表头列严格对齐；缺失值用空字符串。
 5. 保留金额、百分比、负号、括号和单位，不做换算。
+   单位还必须独立写入unit_records；即使rows中的项目名被标准化，也不得丢失原页单位。
+   unit_records的target必须使用columns或rows里实际输出的名称，source_text保留原页含单位文字。
+   只记录图片或文字网格中明确出现的单位，不得根据数值大小或常见口径猜测。
 6. 一旦遇到不得混入的内容或下一张表标题，立即停止；边界行及其后内容不得写入rows。
 7. 只输出JSON对象，不输出Markdown或解释文字。
 
 JSON格式：
 {{"table_id":"{table_id}","table_name":"{table_name}",
  "columns":["列1","列2"],"rows":[["数据1","数据2"]],
+ "unit_records":[
+   {{"scope":"行级","target":"项目名","raw_unit":"元",
+     "source_page":1,"source_text":"项目名（元）","confidence":"高"}}
+ ],
  "notes":"可选的简短重构说明"}}
 """.strip()
 
@@ -510,7 +775,7 @@ def _grid_repair_messages(
 请重新检查列对齐并返回完整JSON。特别注意：
 - “行次/序号”列只是行编号，不是金额列；不得把它判作数值错位。
 - 实际资本明细表应保留“行次、项目、期末数、期初数”等完整列。
-- 组合经营指标必须覆盖主要经营指标、效益类、规模类和品质类全部相邻子表。
+- 组合经营指标按原文实际披露范围提取：后续类别缺失时允许以“综合投资收益率”结束；若出现品质类指标，则必须继续保留至最后的“营销员脱落率”（或同义名称），不得补造缺失项目。
 - 偿付能力充足率指标不得只返回核心/综合充足率两行，必须保留实际资本、最低资本等整张表的所有数据行。
 """
     return messages
@@ -590,14 +855,28 @@ def _call_model(
 ) -> str:
     post = post_func or requests.post
     payload = {
-        "model": model.strip(), "messages": messages, "temperature": 0,
+        "model": normalize_model_id(base_url, model),
+        "messages": messages,
         "response_format": {"type": "json_object"},
     }
+    payload.update(model_request_parameters(base_url, model))
     headers = {"Authorization": f"Bearer {api_key.strip()}", "Content-Type": "application/json"}
-    response = post(_completion_url(base_url), headers=headers, json=payload, timeout=timeout)
+    response = post_json_with_retry(
+        post,
+        _completion_url(base_url),
+        headers=headers,
+        json=payload,
+        timeout=timeout,
+    )
     if not getattr(response, "ok", False) and int(getattr(response, "status_code", 0) or 0) in {400, 422}:
         payload.pop("response_format", None)
-        response = post(_completion_url(base_url), headers=headers, json=payload, timeout=timeout)
+        response = post_json_with_retry(
+            post,
+            _completion_url(base_url),
+            headers=headers,
+            json=payload,
+            timeout=timeout,
+        )
     if not getattr(response, "ok", False):
         raise RuntimeError(f"模型接口调用失败：{_response_error(response) or 'HTTP错误'}")
     try:
@@ -631,6 +910,41 @@ def _parse_json(content: str) -> dict:
     if isinstance(payload.get("tables"), list) and payload["tables"]:
         payload = payload["tables"][0]
     return payload
+
+
+def recover_unit_records_from_images(
+    *,
+    table_id: str,
+    table_name: str,
+    pages: list[int],
+    rows: list[list[str]],
+    images: list[tuple[int, str]],
+    api_key: str,
+    base_url: str,
+    model: str,
+    timeout: int,
+    post_func: Callable | None,
+) -> list[UnitRecord]:
+    payload = _parse_json(_call_model(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        messages=_unit_vision_messages(
+            table_id,
+            table_name,
+            pages,
+            rows,
+            images,
+        ),
+        timeout=timeout,
+        post_func=post_func,
+    ))
+    return unit_records_from_payload(
+        payload,
+        rows,
+        pages,
+        source_type="\u56fe\u7247\u5355\u4f4d\u4e13\u7528\u8865\u63d0\u53d6",
+    )
 
 
 def _header_similarity(row: list[str], columns: list[str]) -> float:
@@ -775,6 +1089,9 @@ def _reconstruct(
         timeout=timeout, post_func=post_func,
     ))
     rows, ragged_ratio, notes = _coerce_table(payload)
+    rows, normalization_note = normalize_three_year_return_rows(table_id, rows)
+    if normalization_note:
+        ragged_ratio = 0.0
     rows, adjacent_note = _trim_adjacent_rows(table_id, rows)
     try:
         rows, item_boundary_note = enforce_output_boundaries(
@@ -783,7 +1100,9 @@ def _reconstruct(
     except TableBoundaryError as exc:
         raise ExtractionQualityError(str(exc)) from exc
     boundary_note = "；".join(
-        item for item in (adjacent_note, item_boundary_note) if item
+        item
+        for item in (normalization_note, adjacent_note, item_boundary_note)
+        if item
     )
     expected_source_rows, source_required_terms = _source_completeness_profile(
         table_id, source_grids
@@ -799,11 +1118,20 @@ def _reconstruct(
         evidence = f"{evidence}；{boundary_note}"
     if notes:
         evidence = f"{evidence}；{notes}"
+    payload_units = unit_records_from_payload(
+        payload,
+        rows,
+        pages,
+        source_type="\u8868\u683c\u7ed3\u6784\u5316\u540c\u6b65\u5355\u4f4d",
+    )
     return ExtractedTable(
         table_id=table_id, table_name=table_name, page=pages[0], table_index=1,
         rows=rows, strategy=mode, quality_score=score, evidence=evidence,
         source_pages=pages,
-        unit_records=extract_unit_records(table_id, rows, source_grids),
+        unit_records=merge_unit_records(
+            extract_unit_records(table_id, rows, source_grids),
+            payload_units,
+        ),
     )
 
 
@@ -875,10 +1203,35 @@ def extract_tables_with_llm(
                 api_key=api_key, base_url=base_url, model=model,
                 timeout=timeout, post_func=post_func,
             )
+            unit_note = ""
+            if unit_recovery_needed(table.rows, table.unit_records):
+                try:
+                    recovered_units = recover_unit_records_from_images(
+                        table_id=table_id,
+                        table_name=table_name,
+                        pages=pages,
+                        rows=table.rows,
+                        images=images,
+                        api_key=api_key,
+                        base_url=base_url,
+                        model=model,
+                        timeout=timeout,
+                        post_func=post_func,
+                    )
+                    table.unit_records = merge_unit_records(
+                        table.unit_records,
+                        recovered_units,
+                    )
+                    if recovered_units:
+                        unit_note = f"；单位专用补提取获得{len(recovered_units)}条明确单位"
+                    else:
+                        unit_note = "；单位专用补提取未发现明确单位，已保留待核对状态"
+                except Exception as unit_exc:
+                    unit_note = f"；单位专用补提取失败，已保留待核对状态：{unit_exc}"
             tables.append(table)
             add_log(ExtractionLog(
                 table_id, table_name, pages, VISION_MODE, "成功",
-                f"图片扫描重试成功，质量评分 {table.quality_score:.1f}。",
+                f"图片扫描重试成功，质量评分 {table.quality_score:.1f}{unit_note}。",
             ))
             continue
         except Exception as vision_exc:

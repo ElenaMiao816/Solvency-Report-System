@@ -17,6 +17,15 @@ TABLE_ITEM_BOUNDARIES = {
             "代理人脱落率",
             "营销员流失率",
         ),
+        "end_item_groups": (
+            (
+                "营销员脱落率",
+                "个人营销员脱落率",
+                "代理人脱落率",
+                "营销员流失率",
+            ),
+            ("综合投资收益率",),
+        ),
         "exclude_items": ("前五大产品的信息",),
     },
     "ACTUAL_CAPITAL": {
@@ -146,31 +155,51 @@ def boundary_items(table_id: str) -> tuple[str, ...]:
         for group in boundary.get("required_item_groups", ())
         for item in group
     )
+    end_grouped = tuple(
+        item
+        for group in boundary.get("end_item_groups", ())
+        for item in group
+    )
     return tuple(dict.fromkeys((
         *boundary.get("start_items", ()),
         *boundary.get("end_items", ()),
+        *end_grouped,
         *boundary.get("required_items", ()),
         *grouped,
     )))
 
+
+def end_item_groups(table_id: str) -> tuple[tuple[str, ...], ...]:
+    boundary = TABLE_ITEM_BOUNDARIES.get(table_id, {})
+    configured = boundary.get("end_item_groups")
+    if configured:
+        return tuple(tuple(group) for group in configured)
+    end_items = tuple(boundary.get("end_items", ()))
+    return (end_items,) if end_items else ()
 
 def boundary_instruction(table_id: str) -> str:
     boundary = TABLE_ITEM_BOUNDARIES.get(table_id)
     if not boundary:
         return ""
     start_items = tuple(boundary.get("start_items", ()))
-    end_items = tuple(boundary.get("end_items", ()))
+    end_groups = end_item_groups(table_id)
+    end_items = end_groups[0] if end_groups else ()
     exclusions = "、".join(boundary.get("exclude_items", ()))
     instruction = (
         f"数据范围从“{start_items[0]}”类项目开始，到“{end_items[0]}”类项目结束；"
         "允许同义名称或省略“近三年/平均/合计”等修饰语，但首尾项目均须保留。"
     )
+    if len(end_groups) > 1:
+        fallback_labels = "、".join(group[0] for group in end_groups[1:] if group)
+        instruction += (
+            f"若原报告未披露主终止项目之后的分类，可按顺序以“{fallback_labels}”作为实际终止项目；"
+            "只要后续终止项目在原页面出现，就必须完整提取到该项目，不得提前截断。"
+        )
     if boundary.get("exact_items_only"):
         instruction += "最终数据区必须且只能包含投资收益率与综合投资收益率两类项目各一行。"
     if exclusions:
         instruction += f"不得输出项目：{exclusions}。"
     return instruction
-
 
 def _find_row(rows: Sequence[Sequence[str]], items: Sequence[str], start: int = 0) -> int | None:
     for index in range(max(0, start), len(rows)):
@@ -225,18 +254,30 @@ def enforce_output_boundaries(
         return rows, ""
 
     start_items = tuple(boundary.get("start_items", ()))
-    end_items = tuple(boundary.get("end_items", ()))
+    end_groups = end_item_groups(table_id)
+    end_items = end_groups[0] if end_groups else ()
     start_index = _find_row(rows, start_items)
     if start_index is None:
         if require_complete:
             raise TableBoundaryError(f"缺少起始项目：{'、'.join(start_items)}。")
         return rows, ""
-    end_index = _find_row(rows, end_items, start=start_index + 1)
-    if end_index is None and any(row_has_item(rows[start_index], item) for item in end_items):
-        end_index = start_index
+
+    end_index = None
+    matched_end_items = end_items
+    for candidate_items in end_groups:
+        candidate_index = _find_row(rows, candidate_items, start=start_index + 1)
+        if candidate_index is None and any(
+            row_has_item(rows[start_index], item) for item in candidate_items
+        ):
+            candidate_index = start_index
+        if candidate_index is not None:
+            end_index = candidate_index
+            matched_end_items = candidate_items
+            break
     if end_index is None:
         if require_complete:
-            raise TableBoundaryError(f"缺少终止项目：{'、'.join(end_items)}。")
+            end_labels = "；".join(" / ".join(group) for group in end_groups)
+            raise TableBoundaryError(f"缺少终止项目：{end_labels}。")
         return rows, ""
 
     header = rows[0] if start_index > 0 else None
@@ -275,4 +316,7 @@ def enforce_output_boundaries(
         header = _canonical_header(table_id, width)
     if header is not None and header not in bounded:
         bounded = [header, *bounded]
-    return bounded, "已按首尾项目边界截取，补全标准表头并过滤独立页码行"
+    return bounded, (
+        "已按首尾项目边界截取，补全标准表头并过滤独立页码行；"
+        f"实际终止项目：{matched_end_items[0] if matched_end_items else '未配置'}"
+    )

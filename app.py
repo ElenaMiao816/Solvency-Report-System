@@ -20,7 +20,13 @@ from services.solvency_hybrid_pipeline import (
     extract_tables_hybrid,
     locate_tables_hybrid,
 )
-from services.solvency_normalizer import STANDARD_COLUMNS, load_taxonomy, normalize_tables, standardize_uploaded_frame
+from services.solvency_normalizer import (
+    LIFE_COMPANY_TYPES,
+    STANDARD_COLUMNS,
+    load_taxonomy,
+    normalize_tables,
+    standardize_uploaded_frame,
+)
 from services.solvency_pdf_locator import PageMatch, extract_report_metadata, load_page_features
 from services.solvency_validator import load_validation_rules, validate_standard_data
 from step7_solvency import show_step_7_solvency
@@ -512,7 +518,10 @@ with tabs[1]:
                     placeholder="填写实际可用的模型名称",
                 )
                 st.text_input("API Key", type="password", key="llm_api_key")
-                st.caption("页码定位和逐页表格提取共用此设置；密钥仅保存在当前浏览器会话。")
+                st.caption(
+                    "页码定位和逐页表格提取共用此设置；扫描页会自动进行两阶段图片定位，"
+                    "因此所选模型需要支持图片输入。密钥仅保存在当前浏览器会话。"
+                )
             if st.button(
                 "启动智能定位",
                 type="primary",
@@ -527,7 +536,7 @@ with tabs[1]:
                 ):
                     st.error("请先在上方填写接口地址、模型名称和API Key。混合智能定位需要语义模型参与。")
                 else:
-                    with st.spinner("正在执行大模型页面推断和Python表格雷达扫描..."):
+                    with st.spinner("正在检测PDF文字层并执行语义、结构与图片页码定位..."):
                         selected_feature_config = {
                             **feature_config,
                             "tables": selected_configs,
@@ -547,7 +556,14 @@ with tabs[1]:
                         }
                         for item in matches:
                             st.session_state[f"page_edit_{item.table_id}"] = ", ".join(map(str, item.pages))
-                    st.success("定位完成！请核对页码并结合右侧页面预览进行校准。")
+                    located_count = sum(bool(item.pages) for item in matches)
+                    if located_count:
+                        st.success(
+                            f"定位完成：{located_count}类目标已找到候选页。"
+                            "请结合右侧页面预览进行校准。"
+                        )
+                    else:
+                        st.warning("尚未自动找到目标页，请查看定位说明或直接填写物理页码。")
                     if "失败" in locator_message:
                         st.warning(locator_message)
                     else:
@@ -660,7 +676,10 @@ with tabs[2]:
                 st.toggle(
                     "所有页面直接使用图片扫描模式",
                     key="force_vision_mode",
-                    help="适用于扫描版或纯图片PDF；所选模型必须支持图片输入。",
+                    help=(
+                        "系统已会自动识别无文字层页面；此开关用于文字层存在但排版异常、"
+                        "仍希望所有已选页强制走图片识别的情况。"
+                    ),
                 )
             st.caption("API Key仅保存在当前浏览器会话内，不会写入配置文件或导出的Excel。")
 
@@ -785,17 +804,57 @@ with tabs[3]:
     st.subheader("偿付能力标准化")
     if STANDARD_TEMPLATE.exists():
         st.download_button("下载标准目标表模板", STANDARD_TEMPLATE.read_bytes(), STANDARD_TEMPLATE.name)
-    company_type = st.selectbox("公司类型", ["寿险", "财险", "再保险", "养老险", "健康险", "其他"], key="standard_company_type")
-    if st.session_state.raw_tables and st.button("生成标准化长表", type="primary", key="normalize_tables"):
+
+    if (
+        "standard_company_type" in st.session_state
+        and st.session_state.standard_company_type not in LIFE_COMPANY_TYPES
+    ):
+        del st.session_state["standard_company_type"]
+    company_type = st.segmented_control(
+        "公司类型",
+        LIFE_COMPANY_TYPES,
+        default=LIFE_COMPANY_TYPES[0],
+        required=True,
+        key="standard_company_type",
+    )
+    if not st.session_state.raw_tables:
+        st.info("请先在 STEP2 完成表格提取。")
+    elif st.button("生成标准化长表", type="primary", key="normalize_tables"):
         st.session_state.standard_data = normalize_tables(
             st.session_state.raw_tables,
             read_taxonomy(),
             st.session_state.metadata,
             company_type,
         )
+        if st.session_state.standard_data.empty:
+            st.warning("未匹配到可标准化的指标，请核对提取表格和指标字典。")
+
     if not st.session_state.standard_data.empty:
-        st.dataframe(st.session_state.standard_data, use_container_width=True, hide_index=True)
-        st.download_button("下载标准化数据", dataframe_to_xlsx(st.session_state.standard_data, "标准数据"), "偿付能力标准数据.xlsx")
+        converted_rows = int(
+            st.session_state.standard_data["备注"]
+            .astype(str)
+            .str.contains("已换算为", regex=False)
+            .sum()
+        )
+        amount_rows = int((st.session_state.standard_data["单位"] == "万元").sum())
+        pending_unit_rows = int(
+            st.session_state.standard_data["备注"]
+            .astype(str)
+            .str.contains("未识别原始单位", regex=False)
+            .sum()
+        )
+        with st.container(horizontal=True):
+            st.metric("长表记录", len(st.session_state.standard_data), border=True)
+            st.metric("金额记录", amount_rows, border=True)
+            st.metric("单位换算", converted_rows, border=True)
+            st.metric("单位待核对", pending_unit_rows, border=True)
+        st.dataframe(st.session_state.standard_data, width="stretch", hide_index=True)
+        st.download_button(
+            "下载标准化数据",
+            dataframe_to_xlsx(st.session_state.standard_data, "标准数据"),
+            "偿付能力标准数据.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
 
 with tabs[4]:

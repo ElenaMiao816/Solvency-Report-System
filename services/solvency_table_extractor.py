@@ -13,7 +13,7 @@ TABLE_SIGNATURES = {
     "SOLVENCY_MAIN": ("认可资产", "综合偿付能力充足率"),
     "LIQUIDITY_RISK": ("LCR1", "未来3个月"),
     "LIQUIDITY_MONITORING": ("综合退保率", "融资杠杆比例"),
-    "OPERATING_METRICS": ("保险业务收入", "营销员脱落率"),
+    "OPERATING_METRICS": ("保险业务收入",),
     "THREE_YEAR_INVESTMENT_RETURN": (
         "投资收益率",
         "综合投资收益率",
