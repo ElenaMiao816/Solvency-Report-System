@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import io
 import json
 import math
@@ -11,6 +12,8 @@ import fitz
 import pdfplumber
 import requests
 
+from .llm_config import model_request_parameters, normalize_model_id
+from .llm_http import post_json_with_retry
 from .solvency_ai_table_extractor import (
     AIExtractionBundle,
     AI_TABLE_END_MARKERS,
@@ -28,6 +31,10 @@ from .solvency_ai_table_extractor import (
     _validate,
     _slice_grid_for_target,
     build_pdf_grids,
+    extract_unit_records,
+    merge_unit_records,
+    recover_unit_records_from_images,
+    unit_recovery_needed,
 )
 from .solvency_table_boundaries import (
     TableBoundaryError,
@@ -42,12 +49,14 @@ from .solvency_pdf_locator import (
     _term_hits,
     locate_tables,
 )
+from .solvency_disclosure_normalizer import normalize_three_year_return_rows
 from .solvency_table_extractor import (
     TABLE_EXCLUSIONS,
     TABLE_HEADERS,
     TABLE_SIGNATURES,
     TABLE_START_MARKERS,
     ExtractedTable,
+    UnitRecord,
 )
 
 PAGE_TEXT_MODE = "逐页文本结构化提取"
@@ -55,6 +64,8 @@ PAGE_VISION_MODE = "逐页图像结构化提取"
 PAGE_RETRY_MODE = "逐页网格纠错"
 CROSS_PAGE_MERGE_MODE = "跨页一致性拼接"
 FULL_TABLE_RECONSTRUCTION_MODE = "多页整表结构化重构"
+LOCATOR_VISION_BATCH_SIZE = 6
+LOW_TEXT_MIN_CHARACTERS = 24
 
 
 def _completion_url(base_url: str) -> str:
@@ -86,17 +97,18 @@ def _call_chat(
 ) -> str:
     post = post_func or requests.post
     payload = {
-        "model": model.strip(),
+        "model": normalize_model_id(base_url, model),
         "messages": messages,
-        "temperature": 0,
     }
+    payload.update(model_request_parameters(base_url, model))
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
     headers = {
         "Authorization": f"Bearer {api_key.strip()}",
         "Content-Type": "application/json",
     }
-    response = post(
+    response = post_json_with_retry(
+        post,
         _completion_url(base_url),
         headers=headers,
         json=payload,
@@ -108,7 +120,8 @@ def _call_chat(
         and int(getattr(response, "status_code", 0) or 0) in {400, 422}
     ):
         payload.pop("response_format", None)
-        response = post(
+        response = post_json_with_retry(
+            post,
             _completion_url(base_url),
             headers=headers,
             json=payload,
@@ -157,6 +170,228 @@ def _physical_pages(value, total_pages: int) -> list[int]:
     else:
         values = []
     return sorted({item for item in values if 1 <= item <= total_pages})
+
+
+def _low_text_page_numbers(
+    page_texts: list[str],
+    minimum_characters: int = LOW_TEXT_MIN_CHARACTERS,
+) -> list[int]:
+    """Return physical pages whose searchable text layer is absent or unusable."""
+    return [
+        index
+        for index, text in enumerate(page_texts, start=1)
+        if len(_compact(text)) < minimum_characters
+    ]
+
+
+def _render_locator_images(
+    pdf_bytes: bytes,
+    pages: list[int],
+    *,
+    zoom: float,
+    quality: int,
+) -> list[tuple[int, str]]:
+    document = fitz.open(stream=pdf_bytes, filetype="pdf")
+    result: list[tuple[int, str]] = []
+    try:
+        for page_number in pages:
+            if page_number < 1 or page_number > len(document):
+                continue
+            pixmap = document.load_page(page_number - 1).get_pixmap(
+                matrix=fitz.Matrix(zoom, zoom),
+                alpha=False,
+            )
+            try:
+                image = pixmap.tobytes("jpeg", jpg_quality=quality)
+                mime = "image/jpeg"
+            except (TypeError, ValueError):
+                image = pixmap.tobytes("png")
+                mime = "image/png"
+            encoded = base64.b64encode(image).decode("ascii")
+            result.append((page_number, f"data:{mime};base64,{encoded}"))
+    finally:
+        document.close()
+    return result
+
+
+def _vision_locator_messages(
+    tables: list[dict],
+    pages: list[int],
+    images: list[tuple[int, str]],
+    *,
+    stage: str,
+    candidate_hints: dict[str, list[int]] | None = None,
+) -> list[dict]:
+    target_spec = [
+        {
+            "table_id": str(item["table_id"]),
+            "table_name": str(item["table_name"]),
+            "max_pages": max(1, int(item.get("max_pages", 1))),
+            "boundary": boundary_instruction(str(item["table_id"])),
+        }
+        for item in tables
+    ]
+    hint_text = json.dumps(candidate_hints or {}, ensure_ascii=False)
+    prompt = f"""你是保险公司偿付能力季度报告的图片页码定位专家。
+当前阶段：{stage}
+本次只检查PDF物理页码：{pages}
+
+目标表及边界：
+{json.dumps(target_spec, ensure_ascii=False)}
+
+上一阶段候选页（仅供复核，不得盲从）：
+{hint_text}
+
+要求：
+1. 直接阅读随后提供的页面图片，页码以每张图片前标注的PDF物理页码为准。
+2. 同时依据标题、表头、首尾数据项目判断；跨页表必须返回本批次中属于该表的全部页。
+3. “近三年（综合）投资收益率”可能不是表格，而是一句话；只要同页披露投资收益率和综合投资收益率两个值，就应定位该页。
+4. “主要经营指标”若继续披露效益类、规模类、品质类指标，应定位到最后的营销员脱落率；不得被相邻的近三年收益率披露混淆。
+5. 只能返回本次提供的物理页码。未在本批次出现的目标返回空数组。
+6. 只输出JSON对象；键使用table_name，值为物理页码数组，并包含全部目标。
+"""
+    content: list[dict] = [{"type": "text", "text": prompt}]
+    for page_number, image_url in images:
+        content.extend([
+            {"type": "text", "text": f"PDF物理第 {page_number} 页"},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url,
+                    "detail": "low" if stage.startswith("低分辨率") else "high",
+                },
+            },
+        ])
+    return [
+        {
+            "role": "system",
+            "content": "你负责从偿付能力报告页面图片中定位目标披露，不得根据常见页码猜测。",
+        },
+        {"role": "user", "content": content},
+    ]
+
+
+def _batched(values: list[int], size: int) -> list[list[int]]:
+    return [values[index:index + size] for index in range(0, len(values), size)]
+
+
+def _run_vision_locator_stage(
+    pdf_bytes: bytes,
+    tables: list[dict],
+    pages: list[int],
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    timeout: int,
+    post_func: Callable | None,
+    stage: str,
+    zoom: float,
+    quality: int,
+    candidate_hints: dict[str, list[int]] | None = None,
+) -> tuple[dict[str, list[int]], list[str]]:
+    result = {str(item["table_id"]): [] for item in tables}
+    errors: list[str] = []
+    for batch in _batched(sorted(set(pages)), LOCATOR_VISION_BATCH_SIZE):
+        try:
+            images = _render_locator_images(
+                pdf_bytes,
+                batch,
+                zoom=zoom,
+                quality=quality,
+            )
+            content = _call_chat(
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                messages=_vision_locator_messages(
+                    tables,
+                    batch,
+                    images,
+                    stage=stage,
+                    candidate_hints=candidate_hints,
+                ),
+                timeout=timeout,
+                post_func=post_func,
+                json_mode=True,
+            )
+            payload = _parse_json_object(content)
+            for table in tables:
+                table_id = str(table["table_id"])
+                table_name = str(table["table_name"])
+                raw_pages = payload.get(table_name, payload.get(table_id, []))
+                located = _physical_pages(raw_pages, max(batch))
+                result[table_id].extend(page for page in located if page in batch)
+        except Exception as exc:
+            errors.append(f"{stage}物理页{batch}失败：{exc}")
+            if _is_unsupported_vision_error(exc):
+                break
+    return {
+        table_id: sorted(set(located_pages))
+        for table_id, located_pages in result.items()
+    }, errors
+
+
+def _locate_low_text_pages_with_vision(
+    pdf_bytes: bytes,
+    tables: list[dict],
+    low_text_pages: list[int],
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    timeout: int,
+    post_func: Callable | None,
+) -> tuple[dict[str, list[int]], dict[str, list[int]], list[str]]:
+    low_candidates, errors = _run_vision_locator_stage(
+        pdf_bytes,
+        tables,
+        low_text_pages,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        timeout=timeout,
+        post_func=post_func,
+        stage="低分辨率候选扫描",
+        zoom=0.9,
+        quality=72,
+    )
+    candidate_pages = sorted({
+        page
+        for pages in low_candidates.values()
+        for page in pages
+    })
+    if not candidate_pages:
+        return low_candidates, low_candidates, errors
+
+    low_text_set = set(low_text_pages)
+    confirmation_pages = sorted({
+        nearby
+        for page in candidate_pages
+        for nearby in (page - 1, page, page + 1)
+        if nearby in low_text_set
+    })
+    confirmed, confirmation_errors = _run_vision_locator_stage(
+        pdf_bytes,
+        tables,
+        confirmation_pages,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        timeout=timeout,
+        post_func=post_func,
+        stage="高分辨率候选确认",
+        zoom=1.8,
+        quality=86,
+        candidate_hints=low_candidates,
+    )
+    final = confirmed
+    if confirmation_errors:
+        final = {
+            table_id: confirmed.get(table_id) or low_candidates.get(table_id, [])
+            for table_id in low_candidates
+        }
+    return low_candidates, final, [*errors, *confirmation_errors]
 
 
 def _solvency_radar(
@@ -250,11 +485,18 @@ def locate_tables_hybrid(
     timeout: int = 180,
     post_func: Callable | None = None,
 ) -> tuple[list[PageMatch], str]:
-    """Hybrid page localization: semantic inference plus structural table radar."""
+    """Locate target disclosures through text radar and two-stage page vision."""
     local_matches = locate_tables(pdf_bytes, feature_config)
     local_by_id = {item.table_id: item for item in local_matches}
     page_texts, radar_hints, hint_text = _solvency_radar(pdf_bytes, feature_config)
     tables = feature_config.get("tables", [])
+    low_text_pages = _low_text_page_numbers(page_texts)
+    low_text_set = set(low_text_pages)
+    searchable_pages = [
+        page
+        for page in range(1, len(page_texts) + 1)
+        if page not in low_text_set
+    ]
     target_names = [str(item["table_name"]) for item in tables]
     boundary_hints = "\n".join(
         f"- {item['table_name']}：{boundary_instruction(str(item['table_id']))}"
@@ -263,6 +505,7 @@ def locate_tables_hybrid(
     scan_text = "\n\n".join(
         f"---PDF物理第{index + 1}页---\n{' '.join(text.split())[:1600]}"
         for index, text in enumerate(page_texts)
+        if index + 1 in searchable_pages
     )
     prompt = f"""你是保险公司偿付能力季度报告审阅专家。请定位下列五类目标表的PDF物理页码。
 
@@ -271,7 +514,7 @@ def locate_tables_hybrid(
 2. 页码必须是PDF阅读器显示的物理页码，不是报告印刷页码。
 3. 表格跨页时必须返回全部连续页；续页可能没有表名，也可能只有一条数据。
 4. 如果某一页顶部仍有上一页表格的一条或数条数据、下方才开始新表，该页仍属于上一张表。
-5. “主要经营指标”包括相邻的主要经营指标、效益类指标、规模类指标、品质类指标四部分。
+5. “主要经营指标”按原报告实际披露范围确定：若后续效益类、规模类、品质类指标未出现，可在“综合投资收益率”结束；若出现后三类指标，则必须继续定位至最后的“营销员脱落率”（或同义名称）。
 6. “S02-实际资本明细表”也可能写作“实际资本表”；“S05-最低资本表”也可能写作“最低资本表”。
 7. 只输出JSON对象，必须包含全部目标表名；找不到时返回空数组。
 
@@ -290,20 +533,36 @@ def locate_tables_hybrid(
 输出示例：
 {{"偿付能力充足率指标":[16],"主要经营指标":[17,18],"S02-实际资本明细表":[25,26]}}"""
     ai_error = ""
-    try:
-        content = _call_chat(
+    ai_result: dict = {}
+    if searchable_pages:
+        try:
+            content = _call_chat(
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                timeout=timeout,
+                post_func=post_func,
+                json_mode=True,
+            )
+            ai_result = _parse_json_object(content)
+        except Exception as exc:
+            ai_error = str(exc)
+
+    vision_candidates = {str(item["table_id"]): [] for item in tables}
+    vision_pages = {str(item["table_id"]): [] for item in tables}
+    vision_errors: list[str] = []
+    if low_text_pages:
+        vision_candidates, vision_pages, vision_errors = _locate_low_text_pages_with_vision(
+            pdf_bytes,
+            tables,
+            low_text_pages,
             api_key=api_key,
             base_url=base_url,
             model=model,
-            messages=[{"role": "user", "content": prompt}],
             timeout=timeout,
             post_func=post_func,
-            json_mode=True,
         )
-        ai_result = _parse_json_object(content)
-    except Exception as exc:
-        ai_result = {}
-        ai_error = str(exc)
 
     total_pages = len(page_texts)
     results: list[PageMatch] = []
@@ -313,6 +572,8 @@ def locate_tables_hybrid(
         local = local_by_id.get(table_id)
         local_pages = list(local.pages) if local else []
         ai_pages = _physical_pages(ai_result.get(table_name, []), total_pages)
+        visual_candidates = vision_candidates.get(table_id, [])
+        visual_pages = vision_pages.get(table_id, [])
         radar_pages = sorted(set(radar_hints.get(table_id, [])))
         boundary_closed = bool(
             local
@@ -324,7 +585,7 @@ def locate_tables_hybrid(
             if boundary_closed
             else _merge_locator_pages(
                 local_pages,
-                ai_pages,
+                sorted(set(ai_pages + visual_pages)),
                 radar_pages,
                 max(1, int(table.get("max_pages", 1))),
             )
@@ -336,6 +597,14 @@ def locate_tables_hybrid(
             evidence_parts.append("首尾项目已闭合，页码范围以项目边界为准")
         if ai_pages:
             evidence_parts.append(f"大模型页码推断：{','.join(map(str, ai_pages))}")
+        if visual_candidates:
+            evidence_parts.append(
+                f"图片候选扫描：{','.join(map(str, visual_candidates))}"
+            )
+        if visual_pages:
+            evidence_parts.append(
+                f"图片候选确认：{','.join(map(str, visual_pages))}"
+            )
         if radar_pages:
             evidence_parts.append(f"Python表格雷达：{','.join(map(str, radar_pages))}")
         if ai_error:
@@ -345,13 +614,28 @@ def locate_tables_hybrid(
                 table_id=table_id,
                 table_name=table_name,
                 pages=pages,
-                score=max(float(local.score) if local else 0.0, 10.0 if ai_pages else 0.0),
+                score=max(
+                    float(local.score) if local else 0.0,
+                    10.0 if ai_pages else 0.0,
+                    12.0 if visual_pages else 0.0,
+                ),
                 evidence="；".join(evidence_parts) or "未找到明确页码证据",
             )
         )
+    status_parts: list[str] = []
+    if low_text_pages:
+        status_parts.append(
+            f"检测到{len(low_text_pages)}/{total_pages}个低文本页，已启用两阶段图片页码定位"
+        )
+    if searchable_pages:
+        status_parts.append("已完成可检索页面语义推断与表格结构雷达复核")
     if ai_error:
-        return results, f"语义页码推断失败，已使用表格结构雷达完成兜底定位：{ai_error}"
-    return results, "已完成混合智能定位：页面语义推断 + 表格结构雷达复核。"
+        status_parts.append(f"文本语义定位失败，已保留其他定位结果：{ai_error}")
+    if vision_errors:
+        status_parts.append("图片页码定位部分失败：" + "；".join(vision_errors))
+    if not status_parts:
+        status_parts.append("已完成混合智能定位")
+    return results, "；".join(status_parts) + "。"
 
 
 def _pipe_prompt(table_id: str, table_name: str, page_number: int, retry_reason: str = "") -> str:
@@ -361,14 +645,18 @@ def _pipe_prompt(table_id: str, table_name: str, page_number: int, retry_reason:
     operating_note = ""
     if table_id == "OPERATING_METRICS":
         operating_note = (
-            "主要经营指标由主要经营指标、效益类指标、规模类指标、品质类指标组成；"
-            "本页出现其中任一部分都必须完整提取。若续页只有“营销员脱落率”一行，"
-            "该行仍必须提取。不得输出“前五大产品的信息”项目或其产品明细。"
+            "主要经营指标按原报告实际披露范围提取并保持原顺序。若报告只披露至‘综合投资收益率’，"
+            "且后续效益类、规模类、品质类指标未出现，则以该项目作为实际终点；"
+            "若原文继续披露后三类指标，则必须继续提取至最后的‘营销员脱落率’（或同义名称）。"
+            "不得补造未披露指标，也不得因备用终点而提前截断。"
+            "不得输出‘前五大产品的信息’项目或其产品明细。"
         )
     elif table_id == "THREE_YEAR_INVESTMENT_RETURN":
         operating_note = (
             "该目标表的数据区固定为两类各一行：投资收益率、综合投资收益率。"
             "项目名称可能带有或省略“近三年”“平均”等修饰语，均须按原文保留；"
+            "原报告可能以一句话同时披露两个数值而不是表格；遇到句式披露时，必须将其拆分为"
+            "‘近三年平均投资收益率|数值’和‘近三年平均综合投资收益率|数值’两行；"
             "不得混入备注、主要经营指标或前五大产品明细。"
         )
 
@@ -477,6 +765,15 @@ def _trim_page_rows(table_id: str, rows: list[list[str]]) -> list[list[str]]:
     if not trimmed:
         raise ExtractionQualityError("目标表在相邻表边界之前没有有效行。")
     return trimmed
+
+
+def _prepare_page_rows(
+    table_id: str,
+    content: str,
+) -> tuple[list[list[str]], str]:
+    rows = _parse_pipe_rows(content)
+    rows, normalization_note = normalize_three_year_return_rows(table_id, rows)
+    return _trim_page_rows(table_id, rows), normalization_note
 
 
 def _validate_single_page(
@@ -603,7 +900,13 @@ def _extract_one_page(
     force_vision: bool,
     timeout: int,
     post_func: Callable | None,
-) -> tuple[list[list[str]] | None, str, float, list[ExtractionLog]]:
+) -> tuple[
+    list[list[str]] | None,
+    str,
+    float,
+    list[ExtractionLog],
+    list[UnitRecord],
+]:
     logs: list[ExtractionLog] = []
     text_error = ""
     if not force_vision:
@@ -618,13 +921,22 @@ def _extract_one_page(
                 timeout=timeout,
                 post_func=post_func,
             )
-            rows = _trim_page_rows(table_id, _parse_pipe_rows(content))
+            rows, normalization_note = _prepare_page_rows(table_id, content)
             score, expected, actual = _validate_single_page(table_id, rows, grid)
+            detail = f"逐页提取完成；源网格约{expected}条数值行，返回{actual}条。"
+            if normalization_note:
+                detail += normalization_note + "。"
             logs.append(ExtractionLog(
                 table_id, table_name, [page_number], PAGE_TEXT_MODE, "成功",
-                f"逐页提取完成；源网格约{expected}条数值行，返回{actual}条。",
+                detail,
             ))
-            return rows, PAGE_TEXT_MODE, score, logs
+            return (
+                rows,
+                PAGE_TEXT_MODE,
+                score,
+                logs,
+                extract_unit_records(table_id, rows, [grid]),
+            )
         except Exception as exc:
             text_error = str(exc)
             logs.append(ExtractionLog(
@@ -632,7 +944,7 @@ def _extract_one_page(
                 "触发图片重试" if auto_vision_retry else "失败", text_error,
             ))
     if not (force_vision or auto_vision_retry):
-        return None, "", 0.0, logs
+        return None, "", 0.0, logs, []
 
     vision_error = ""
     try:
@@ -647,13 +959,38 @@ def _extract_one_page(
             timeout=timeout,
             post_func=post_func,
         )
-        rows = _trim_page_rows(table_id, _parse_pipe_rows(content))
+        rows, normalization_note = _prepare_page_rows(table_id, content)
         score, expected, actual = _validate_single_page(table_id, rows, grid)
+        detail = f"逐页图片提取完成；源网格约{expected}条数值行，返回{actual}条。"
+        if normalization_note:
+            detail += normalization_note + "。"
+        page_units = extract_unit_records(table_id, rows, [grid])
+        if unit_recovery_needed(rows, page_units):
+            try:
+                recovered_units = recover_unit_records_from_images(
+                    table_id=table_id,
+                    table_name=table_name,
+                    pages=[page_number],
+                    rows=rows,
+                    images=images,
+                    api_key=api_key,
+                    base_url=base_url,
+                    model=model,
+                    timeout=timeout,
+                    post_func=post_func,
+                )
+                page_units = merge_unit_records(page_units, recovered_units)
+                if recovered_units:
+                    detail += f"单位专用补提取获得{len(recovered_units)}条明确单位。"
+                else:
+                    detail += "单位专用补提取未发现明确单位，已保留待核对状态。"
+            except Exception as unit_exc:
+                detail += f"单位专用补提取失败，已保留待核对状态：{unit_exc}。"
         logs.append(ExtractionLog(
             table_id, table_name, [page_number], PAGE_VISION_MODE, "成功",
-            f"逐页图片提取完成；源网格约{expected}条数值行，返回{actual}条。",
+            detail,
         ))
-        return rows, PAGE_VISION_MODE, score, logs
+        return rows, PAGE_VISION_MODE, score, logs, page_units
     except Exception as exc:
         vision_error = str(exc)
         unsupported = _is_unsupported_vision_error(exc)
@@ -668,7 +1005,7 @@ def _extract_one_page(
             table_id, table_name, [page_number], PAGE_RETRY_MODE, "失败",
             "本页没有足够文字层，图片模式也未成功。",
         ))
-        return None, "", 0.0, logs
+        return None, "", 0.0, logs, []
     try:
         reason = "；".join(item for item in (text_error, vision_error) if item)
         content = _call_chat(
@@ -681,18 +1018,27 @@ def _extract_one_page(
             timeout=timeout,
             post_func=post_func,
         )
-        rows = _trim_page_rows(table_id, _parse_pipe_rows(content))
+        rows, normalization_note = _prepare_page_rows(table_id, content)
         score, expected, actual = _validate_single_page(table_id, rows, grid)
+        detail = f"逐页文本纠错完成；源网格约{expected}条数值行，返回{actual}条。"
+        if normalization_note:
+            detail += normalization_note + "。"
         logs.append(ExtractionLog(
             table_id, table_name, [page_number], PAGE_RETRY_MODE, "成功",
-            f"逐页文本纠错完成；源网格约{expected}条数值行，返回{actual}条。",
+            detail,
         ))
-        return rows, PAGE_RETRY_MODE, score, logs
+        return (
+            rows,
+            PAGE_RETRY_MODE,
+            score,
+            logs,
+            extract_unit_records(table_id, rows, [grid]),
+        )
     except Exception as exc:
         logs.append(ExtractionLog(
             table_id, table_name, [page_number], PAGE_RETRY_MODE, "失败", str(exc),
         ))
-        return None, "", 0.0, logs
+        return None, "", 0.0, logs, []
 
 
 def extract_tables_hybrid(
@@ -791,6 +1137,7 @@ def extract_tables_hybrid(
         page_rows: dict[int, list[list[str]]] = {}
         page_modes: dict[int, str] = {}
         page_scores: dict[int, float] = {}
+        page_unit_records: dict[int, list[UnitRecord]] = {}
         workers = 2 if force_vision else min(5, max(1, len(pages)))
         with ThreadPoolExecutor(max_workers=workers) as executor:
             future_map = {
@@ -814,9 +1161,9 @@ def extract_tables_hybrid(
             for future in as_completed(future_map):
                 page = future_map[future]
                 try:
-                    rows, mode, score, page_logs = future.result()
+                    rows, mode, score, page_logs, units = future.result()
                 except Exception as exc:
-                    rows, mode, score = None, "", 0.0
+                    rows, mode, score, units = None, "", 0.0, []
                     page_logs = [ExtractionLog(
                         match.table_id, match.table_name, [page], PAGE_TEXT_MODE,
                         "失败", f"逐页任务异常：{exc}",
@@ -827,6 +1174,7 @@ def extract_tables_hybrid(
                     page_rows[page] = rows
                     page_modes[page] = mode
                     page_scores[page] = score
+                    page_unit_records[page] = units
 
         missing_pages = [page for page in pages if page not in page_rows]
         if missing_pages:
@@ -858,6 +1206,10 @@ def extract_tables_hybrid(
             )
             modes = [page_modes[page] for page in pages]
             strategy = CROSS_PAGE_MERGE_MODE + "（" + " / ".join(dict.fromkeys(modes)) + "）"
+            merged_units = merge_unit_records(
+                extract_unit_records(match.table_id, merged_rows, grids),
+                *[page_unit_records.get(page, []) for page in pages],
+            )
             tables.append(ExtractedTable(
                 table_id=match.table_id,
                 table_name=match.table_name,
@@ -868,7 +1220,7 @@ def extract_tables_hybrid(
                 quality_score=min(quality, sum(page_scores.values()) / len(page_scores)),
                 evidence=f"{evidence}；{boundary_note}；逐页提取成功后按物理页码{pages}拼接",
                 source_pages=pages,
-                unit_records=extract_unit_records(match.table_id, merged_rows, grids),
+                unit_records=merged_units,
             ))
             add_log(ExtractionLog(
                 match.table_id, match.table_name, pages, CROSS_PAGE_MERGE_MODE, "成功",

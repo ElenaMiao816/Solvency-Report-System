@@ -9,7 +9,11 @@ from typing import Iterable
 
 import pdfplumber
 
-from .solvency_table_boundaries import TABLE_ITEM_BOUNDARIES, text_has_item
+from .solvency_table_boundaries import (
+    TABLE_ITEM_BOUNDARIES,
+    end_item_groups,
+    text_has_item,
+)
 
 
 @dataclass(frozen=True)
@@ -220,10 +224,11 @@ def _expand_to_item_boundaries(
     selected: list[tuple[int, float, list[str]]],
 ) -> list[tuple[int, float, list[str]]]:
     """Use first/last business items to deterministically close cross-page ranges."""
-    boundary = TABLE_ITEM_BOUNDARIES.get(str(table.get("table_id", "")), {})
+    table_id = str(table.get("table_id", ""))
+    boundary = TABLE_ITEM_BOUNDARIES.get(table_id, {})
     start_items = tuple(boundary.get("start_items", ()))
-    end_items = tuple(boundary.get("end_items", ()))
-    if not start_items or not end_items:
+    end_groups = end_item_groups(table_id)
+    if not start_items or not end_groups:
         return selected
 
     start_pages = [
@@ -231,23 +236,33 @@ def _expand_to_item_boundaries(
         for index, text in enumerate(page_texts, start=1)
         if any(text_has_item(text, item, require_value=True) for item in start_items)
     ]
-    end_pages = [
-        index
-        for index, text in enumerate(page_texts, start=1)
-        if any(text_has_item(text, item, require_value=True) for item in end_items)
-    ]
-    if not start_pages or not end_pages:
+    if not start_pages:
         return selected
 
     anchor = selected[0][0] if selected else start_pages[0]
     start_page = min(start_pages, key=lambda page: (abs(page - anchor), page))
     max_pages = max(1, int(table.get("max_pages", 1)))
-    eligible_ends = [
-        page for page in end_pages
-        if start_page <= page < start_page + max_pages
-    ]
-    if not eligible_ends:
+
+    selected_end_group: tuple[str, ...] | None = None
+    eligible_ends: list[int] = []
+    for candidate_group in end_groups:
+        end_pages = [
+            index
+            for index, text in enumerate(page_texts, start=1)
+            if any(text_has_item(text, item, require_value=True) for item in candidate_group)
+        ]
+        eligible = [
+            page
+            for page in end_pages
+            if start_page <= page < start_page + max_pages
+        ]
+        if eligible:
+            selected_end_group = candidate_group
+            eligible_ends = eligible
+            break
+    if not eligible_ends or selected_end_group is None:
         return selected
+
     end_page = min(eligible_ends)
     if end_page - start_page + 1 > max_pages:
         return selected
@@ -260,7 +275,7 @@ def _expand_to_item_boundaries(
         if page == start_page:
             page_hits.append(f"起始项目：{start_items[0]}")
         if page == end_page:
-            page_hits.append(f"终止项目：{end_items[0]}")
+            page_hits.append(f"终止项目：{selected_end_group[0]}")
         if start_page < page < end_page:
             page_hits.append("首尾项目之间的连续物理页")
         expanded.append((page, max(score, 5.0), page_hits))

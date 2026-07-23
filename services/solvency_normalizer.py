@@ -16,6 +16,27 @@ STANDARD_COLUMNS = [
     "数值", "单位", "数据类型", "是否预测", "来源页码", "原始披露值", "备注",
 ]
 
+LIFE_COMPANY_TYPES = ("寿险", "健康险", "养老险")
+
+_COMPANY_TYPE_ALIASES = {
+    "寿险": "寿险",
+    "健康": "健康险",
+    "健康险": "健康险",
+    "养老": "养老险",
+    "养老险": "养老险",
+}
+
+_CURRENCY_UNIT_IN_YUAN = {
+    "元": 1.0,
+    "千元": 1_000.0,
+    "万元": 10_000.0,
+    "亿元": 100_000_000.0,
+}
+
+_INLINE_UNIT_PATTERN = re.compile(
+    r"[（(]\s*(亿元|万元|千元|元|%|％|百分比|百分点|人|户|件|次|级)\s*[）)]"
+)
+
 
 PERIOD_TERMS = [
     "本季度末数", "上季度末数", "下季度末预测数", "本季度数", "上季度数",
@@ -50,7 +71,100 @@ def parse_numeric(value):
 
 
 def _normalize_label(value: str) -> str:
-    return re.sub(r"[\s：:（）()、，,。·—\-_/]", "", str(value or ""))
+    text = _INLINE_UNIT_PATTERN.sub("", str(value or ""))
+    return re.sub(r"[\s：:（）()、，,。·—\-_/]", "", text)
+
+
+def normalize_company_type(company_type: str) -> str:
+    normalized = _COMPANY_TYPE_ALIASES.get(str(company_type or "").strip())
+    if normalized not in LIFE_COMPANY_TYPES:
+        supported = "、".join(LIFE_COMPANY_TYPES)
+        raise ValueError(f"公司类型仅支持：{supported}")
+    return normalized
+
+
+def _canonical_unit(value: str) -> str:
+    text = re.sub(r"[\s：:（）()]", "", str(value or "")).replace("％", "%")
+    if "百分比" in text:
+        return "%"
+    if "百分点" in text:
+        return "百分点"
+    for unit in ("亿元", "万元", "千元", "元", "%", "人", "户", "件", "次", "级"):
+        if text.endswith(unit):
+            return unit
+    return text
+
+
+def _unit_from_text(value: str) -> str:
+    matches = list(_INLINE_UNIT_PATTERN.finditer(str(value or "")))
+    return _canonical_unit(matches[-1].group(1)) if matches else ""
+
+
+def _select_unit(records, target_unit: str) -> str:
+    units = list(dict.fromkeys(
+        _canonical_unit(record.normalized_unit)
+        for record in records
+        if _canonical_unit(record.normalized_unit)
+    ))
+    if target_unit in _CURRENCY_UNIT_IN_YUAN:
+        units = [unit for unit in units if unit in _CURRENCY_UNIT_IN_YUAN]
+    elif target_unit == "%":
+        units = [unit for unit in units if unit == "%"]
+    return units[0] if len(units) == 1 else ""
+
+
+def _source_unit(
+    table: ExtractedTable,
+    label: str,
+    header: str,
+    target_unit: str,
+) -> str:
+    normalized_label = _normalize_label(label)
+    header_parts = [part for part in str(header or "").split("/") if part]
+    normalized_headers = {_normalize_label(part) for part in header_parts}
+
+    row_records = [
+        record
+        for record in table.unit_records
+        if record.scope == "行级" and _normalize_label(record.target) == normalized_label
+    ]
+    selected = _select_unit(row_records, target_unit)
+    if selected:
+        return selected
+    inline_row_unit = _unit_from_text(label)
+    if inline_row_unit:
+        return inline_row_unit
+
+    column_records = [
+        record
+        for record in table.unit_records
+        if record.scope == "列级" and _normalize_label(record.target) in normalized_headers
+    ]
+    selected = _select_unit(column_records, target_unit)
+    if selected:
+        return selected
+    for part in reversed(header_parts):
+        inline_column_unit = _unit_from_text(part)
+        if inline_column_unit:
+            return inline_column_unit
+
+    table_records = [record for record in table.unit_records if record.scope == "表级"]
+    return _select_unit(table_records, target_unit)
+
+
+def _convert_unit(value: float, source_unit: str, target_unit: str) -> tuple[float, str]:
+    if (
+        source_unit not in _CURRENCY_UNIT_IN_YUAN
+        or target_unit not in _CURRENCY_UNIT_IN_YUAN
+        or source_unit == target_unit
+    ):
+        return value, ""
+    converted = (
+        value
+        * _CURRENCY_UNIT_IN_YUAN[source_unit]
+        / _CURRENCY_UNIT_IN_YUAN[target_unit]
+    )
+    return converted, f"原单位：{source_unit}；已换算为{target_unit}"
 
 
 def _taxonomy_candidates(taxonomy: pd.DataFrame) -> list[tuple[int, list[str]]]:
@@ -95,6 +209,7 @@ def normalize_tables(
     metadata: dict,
     company_type: str = "寿险",
 ) -> pd.DataFrame:
+    company_type = normalize_company_type(company_type)
     records: list[dict] = []
     candidates = _taxonomy_candidates(taxonomy)
     for table in tables:
@@ -138,6 +253,8 @@ def normalize_tables(
                 raw_value = row[column_index]
                 numeric_value = parse_numeric(raw_value)
                 data_type = str(metric.get("数据类型", "金额"))
+                target_unit = str(metric.get("标准单位", "")).strip()
+                note = ""
                 if data_type in {"文本", "评级", "布尔"}:
                     value = raw_value.strip()
                     if not value:
@@ -146,6 +263,16 @@ def normalize_tables(
                     if pd.isna(numeric_value):
                         continue
                     value = numeric_value
+                    source_unit = _source_unit(
+                        table,
+                        label,
+                        headers[column_index],
+                        target_unit,
+                    )
+                    if target_unit in _CURRENCY_UNIT_IN_YUAN and not source_unit:
+                        note = "未识别原始单位，数值未换算"
+                    else:
+                        value, note = _convert_unit(value, source_unit, target_unit)
                 period = _period_header(headers, column_index)
                 if period.endswith("/认可价值"):
                     period = period.removesuffix("/认可价值")
@@ -167,12 +294,12 @@ def normalize_tables(
                     "指标名称": metric.get("指标名称", label),
                     "期间口径": period,
                     "数值": value,
-                    "单位": metric.get("标准单位", ""),
+                    "单位": target_unit,
                     "数据类型": data_type,
                     "是否预测": "是" if "预测" in period else "否",
                     "来源页码": "、".join(map(str, table.source_pages)) if table.source_pages else table.page,
                     "原始披露值": raw_value,
-                    "备注": "",
+                    "备注": note,
                 })
     return pd.DataFrame(records, columns=STANDARD_COLUMNS)
 

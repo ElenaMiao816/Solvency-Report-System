@@ -10,6 +10,8 @@ from services.solvency_ai_table_extractor import (
     PageGrid,
     extract_unit_records,
     reconstructed_workbook_bytes,
+    unit_records_from_payload,
+    unit_recovery_needed,
 )
 from services.solvency_table_extractor import ExtractedTable
 
@@ -87,6 +89,48 @@ class UnitExtractionTests(unittest.TestCase):
             table_sheet.cell(table_sheet.max_row, 1).value,
             "\u3010\u5355\u4f4d\u5907\u6ce8\u3011",
         )
+
+    def test_scanned_payload_maps_original_label_unit_to_normalized_row(self):
+        rows = [
+            ["\u884c\u6b21", "\u9879\u76ee", "\u672c\u5b63\u5ea6\u672b\u6570", "\u4e0a\u5b63\u5ea6\u672b\u6570"],
+            [
+                "5",
+                "\u5b9e\u9645\u8d44\u672c\u5408\u8ba1",
+                "3,593,086,798.99",
+                "3,435,399,358.42",
+            ],
+        ]
+        payload = {
+            "unit_records": [{
+                "scope": "\u884c\u7ea7",
+                "target": "\u5b9e\u9645\u8d44\u672c\uff08\u5143\uff09",
+                "raw_unit": "\u5143",
+                "source_page": 8,
+                "source_text": "\u5b9e\u9645\u8d44\u672c\uff08\u5143\uff09",
+                "confidence": "\u9ad8",
+            }],
+        }
+
+        records = unit_records_from_payload(payload, rows, [8])
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].target, "\u5b9e\u9645\u8d44\u672c\u5408\u8ba1")
+        self.assertEqual(records[0].normalized_unit, "\u5143")
+        self.assertEqual(records[0].source_page, 8)
+        self.assertFalse(unit_recovery_needed(rows, records))
+
+    def test_scanned_numeric_row_without_unit_requests_recovery(self):
+        rows = [
+            ["\u884c\u6b21", "\u9879\u76ee", "\u672c\u5b63\u5ea6\u672b\u6570", "\u4e0a\u5b63\u5ea6\u672b\u6570"],
+            [
+                "5",
+                "\u5b9e\u9645\u8d44\u672c\u5408\u8ba1",
+                "3,593,086,798.99",
+                "3,435,399,358.42",
+            ],
+        ]
+
+        self.assertTrue(unit_recovery_needed(rows, []))
 
 
 if __name__ == "__main__":
