@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from .solvency_table_extractor import ExtractedTable
 
 
 STANDARD_COLUMNS = [
-    "公司", "公司类型", "报告年度", "报告季度", "报告期", "披露日期",
+    "公司", "公司类型", "报告类型", "报告年度", "报告季度", "报告期", "披露日期",
     "一级模块", "二级模块", "行次", "指标编码", "指标名称", "期间口径",
     "数值", "单位", "数据类型", "是否预测", "来源页码", "原始披露值", "备注",
 ]
@@ -39,10 +40,57 @@ _INLINE_UNIT_PATTERN = re.compile(
 
 
 PERIOD_TERMS = [
-    "本季度末数", "上季度末数", "下季度末预测数", "本季度数", "上季度数",
+    "本季度末数", "上季度末数", "下季度末预测数", "下季度预测数",
+    "基本情景下的下季度预测数", "本季度数", "上季度数",
     "本年累计数", "期末数", "期初数", "未来3个月", "未来12个月",
     "账面价值", "非认可", "认可价值",
 ]
+PERIOD_ALIASES = {
+    "下季度预测数": "下季度末预测数",
+    "基本情景下的下季度预测数": "下季度末预测数",
+}
+
+TABLE_ALLOWED_CODES = {
+    "SOLVENCY_MAIN": {
+        "RECOGNIZED_ASSETS",
+        "RECOGNIZED_LIABILITIES",
+        "ACTUAL_CAPITAL",
+        "CORE_T1_CAPITAL",
+        "CORE_T2_CAPITAL",
+        "ANC_T1_CAPITAL",
+        "ANC_T2_CAPITAL",
+        "MINIMUM_CAPITAL",
+        "QUANT_RISK_CAPITAL",
+        "CONTROL_RISK_CAPITAL",
+        "ADDITIONAL_CAPITAL",
+        "CORE_SOLVENCY_SURPLUS",
+        "COMBINED_SOLVENCY_SURPLUS",
+        "CORE_SOLVENCY_RATIO",
+        "COMBINED_SOLVENCY_RATIO",
+    },
+    "ACTUAL_CAPITAL": {
+        "ACTUAL_CAPITAL",
+        "CORE_T1_CAPITAL",
+        "CORE_T2_CAPITAL",
+        "ANC_T1_CAPITAL",
+        "ANC_T2_CAPITAL",
+    },
+    "THREE_YEAR_INVESTMENT_RETURN": {
+        "INVESTMENT_RETURN",
+        "COMPREHENSIVE_INVESTMENT_RETURN",
+    },
+}
+
+
+@dataclass(frozen=True)
+class MetricMatchDecision:
+    metric: pd.Series | None
+    score: float
+    runner_up_score: float
+    ambiguous: bool
+    reason: str
+    candidate_name: str = ""
+    runner_up_name: str = ""
 
 
 def load_taxonomy(path: str | Path) -> pd.DataFrame:
@@ -176,30 +224,108 @@ def _taxonomy_candidates(taxonomy: pd.DataFrame) -> list[tuple[int, list[str]]]:
     return candidates
 
 
-def match_metric(label: str, taxonomy: pd.DataFrame, candidates=None):
+def resolve_metric_match(
+    label: str,
+    taxonomy: pd.DataFrame,
+    candidates=None,
+    *,
+    table_id: str = "",
+    minimum_score: float = 0.72,
+    ambiguity_margin: float = 0.08,
+) -> MetricMatchDecision:
     normalized = _normalize_label(label)
     if not normalized:
-        return None
+        return MetricMatchDecision(None, 0.0, 0.0, False, "项目名称为空")
     candidates = candidates or _taxonomy_candidates(taxonomy)
-    best_index, best_score = None, 0.0
+    allowed_codes = TABLE_ALLOWED_CODES.get(table_id)
+    if table_id == "OPERATING_METRICS":
+        allowed_codes = set(
+            taxonomy.loc[taxonomy["一级模块"] == "经营指标", "指标编码"].astype(str)
+        )
+    elif table_id == "MINIMUM_CAPITAL":
+        allowed_codes = set(
+            taxonomy.loc[taxonomy["一级模块"] == "最低资本", "指标编码"].astype(str)
+        )
+
+    ranked: list[tuple[float, bool, int]] = []
     for index, aliases in candidates:
+        code = str(taxonomy.loc[index].get("指标编码", "")).strip()
+        if allowed_codes is not None and code not in allowed_codes:
+            continue
+        candidate_score = 0.0
+        exact = False
         for alias in aliases:
             if not alias:
                 continue
-            if alias in normalized or normalized in alias:
+            if alias == normalized:
+                score = 2.0
+                exact = True
+            elif alias in normalized or normalized in alias:
                 score = min(len(alias), len(normalized)) / max(len(alias), len(normalized)) + 0.5
             else:
                 score = SequenceMatcher(None, normalized, alias).ratio()
-            if score > best_score:
-                best_index, best_score = index, score
-    return taxonomy.loc[best_index] if best_index is not None and best_score >= 0.72 else None
+            candidate_score = max(candidate_score, score)
+        if candidate_score:
+            ranked.append((candidate_score, exact, index))
+    ranked.sort(key=lambda item: (-item[0], -int(item[1]), item[2]))
+    if not ranked:
+        return MetricMatchDecision(None, 0.0, 0.0, False, "目标表范围内没有候选指标")
+
+    best_score, exact, best_index = ranked[0]
+    runner_score = ranked[1][0] if len(ranked) > 1 else 0.0
+    runner_exact = ranked[1][1] if len(ranked) > 1 else False
+    best_name = str(taxonomy.loc[best_index].get("指标名称", ""))
+    runner_name = (
+        str(taxonomy.loc[ranked[1][2]].get("指标名称", ""))
+        if len(ranked) > 1 else ""
+    )
+    if best_score < minimum_score:
+        return MetricMatchDecision(
+            None,
+            best_score,
+            runner_score,
+            False,
+            f"最佳匹配得分低于{minimum_score:.2f}",
+            best_name,
+            runner_name,
+        )
+    ambiguous = (
+        len(ranked) > 1
+        and runner_score >= minimum_score
+        and best_score - runner_score < ambiguity_margin
+        and (not exact or runner_exact)
+    )
+    if ambiguous:
+        return MetricMatchDecision(
+            None,
+            best_score,
+            runner_score,
+            True,
+            f"前两候选分差小于{ambiguity_margin:.2f}",
+            best_name,
+            runner_name,
+        )
+    return MetricMatchDecision(
+        taxonomy.loc[best_index],
+        best_score,
+        runner_score,
+        False,
+        "精确别名匹配" if exact else "唯一高置信度匹配",
+        best_name,
+        runner_name,
+    )
+
+
+def match_metric(label: str, taxonomy: pd.DataFrame, candidates=None):
+    """Backward-compatible high-confidence metric matcher."""
+    return resolve_metric_match(label, taxonomy, candidates).metric
 
 
 def _period_header(row: list[str], index: int) -> str:
     current = str(row[index]).strip() if index < len(row) else ""
     for term in PERIOD_TERMS:
         if term in current:
-            return term
+            return PERIOD_ALIASES.get(term, term)
     return current or f"列{index + 1}"
 
 
@@ -208,6 +334,8 @@ def normalize_tables(
     taxonomy: pd.DataFrame,
     metadata: dict,
     company_type: str = "寿险",
+    report_profile_id: str = "LIFE_SOLVENCY",
+    diagnostics: list[dict] | None = None,
 ) -> pd.DataFrame:
     company_type = normalize_company_type(company_type)
     records: list[dict] = []
@@ -245,8 +373,26 @@ def normalize_tables(
             row_number = row[0] if re.fullmatch(r"\d+(?:\.\d+)*\*?", row[0].strip()) else ""
             label_index = 1 if row_number and max_width > 1 else 0
             label = row[label_index].strip()
-            metric = match_metric(label, taxonomy, candidates)
+            decision = resolve_metric_match(
+                label,
+                taxonomy,
+                candidates,
+                table_id=table.table_id,
+            )
+            metric = decision.metric
             if metric is None:
+                if diagnostics is not None and label:
+                    diagnostics.append({
+                        "目标表": table.table_name,
+                        "来源页码": "、".join(map(str, table.source_pages or [table.page])),
+                        "原始项目": label,
+                        "状态": "歧义" if decision.ambiguous else "未匹配",
+                        "原因": decision.reason,
+                        "最佳候选": decision.candidate_name,
+                        "最佳得分": round(decision.score, 3),
+                        "第二候选": decision.runner_up_name,
+                        "第二得分": round(decision.runner_up_score, 3),
+                    })
                 continue
             value_start = label_index + 1
             for column_index in range(value_start, max_width):
@@ -283,6 +429,7 @@ def normalize_tables(
                 records.append({
                     "公司": metadata.get("公司", ""),
                     "公司类型": company_type,
+                    "报告类型": report_profile_id,
                     "报告年度": metadata.get("报告年度"),
                     "报告季度": metadata.get("报告季度", ""),
                     "报告期": metadata.get("报告期", ""),

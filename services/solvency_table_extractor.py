@@ -25,7 +25,14 @@ TABLE_SIGNATURES = {
 }
 TABLE_EXCLUSIONS = {
     "SOLVENCY_MAIN": ("监管指标名称", "流动性覆盖率", "LCR1", "LCR2", "LCR3"),
-    "OPERATING_METRICS": ("流动性风险监测指标", "流动性风险监管指标", "LCR1"),
+    "OPERATING_METRICS": (
+        "流动性风险监测指标",
+        "流动性风险监管指标",
+        "LCR1",
+        "前五大产品的信息",
+        "报告期内签单保费占前五位的产品",
+        "签单保费占前五位的产品",
+    ),
     "ACTUAL_CAPITAL": ("认可资产表", "认可负债表", "最低资本表"),
     "THREE_YEAR_INVESTMENT_RETURN": ("流动性覆盖率", "最低资本表"),
     "MINIMUM_CAPITAL": ("认可资产表", "认可负债表"),
@@ -35,6 +42,7 @@ TABLE_HEADERS = {
     "SOLVENCY_MAIN": (
         "项目", "指标名称", "本季度数", "本季度末数",
         "上季度可比数", "上季度末数", "基本情景下的下季度预测数",
+        "下季度预测数", "下季度末预测数",
     ),
     "OPERATING_METRICS": ("指标名称", "本季度", "本年累计"),
     "ACTUAL_CAPITAL": ("行次", "期末数", "期初数"),
@@ -45,18 +53,39 @@ TABLE_HEADERS = {
 TABLE_START_MARKERS = {
     "SOLVENCY_MAIN": ("指标名称", "认可资产"),
     "OPERATING_METRICS": ("主要经营指标", "效益类指标", "规模类指标", "品质类指标", "保险业务收入"),
-    "ACTUAL_CAPITAL": ("实际资本表", "实际资本明细表", "核心一级资本"),
+    "ACTUAL_CAPITAL": (
+        "实际资本表",
+        "实际资本明细表",
+        "实际资本汇总",
+        "核心资本",
+        "财务报表资产总额",
+        "认可资产",
+        "核心一级资本",
+    ),
     "THREE_YEAR_INVESTMENT_RETURN": (
         "近三年（综合）投资收益率",
         "近三年平均投资收益率",
     ),
-    "MINIMUM_CAPITAL": ("最低资本表", "量化风险最低资本"),
+    "MINIMUM_CAPITAL": (
+        "最低资本表",
+        "最低资本",
+        "量化风险最低资本",
+        "保险风险最低资本汇总",
+        "市场风险最低资本汇总",
+        "信用风险最低资本汇总",
+    ),
 }
 
 TABLE_END_MARKERS = {
     "SOLVENCY_MAIN": ("监管指标名称", "流动性覆盖率", "LCR1"),
     "OPERATING_METRICS": ("流动性风险监测指标", "流动性风险监管指标", "近三年综合投资收益率", "近三年（综合）投资收益率"),
-    "ACTUAL_CAPITAL": ("认可资产表", "认可负债表", "最低资本表"),
+    "ACTUAL_CAPITAL": (
+        "（三）认可资产",
+        "(三)认可资产",
+        "认可资产表",
+        "认可负债表",
+        "最低资本表",
+    ),
     "THREE_YEAR_INVESTMENT_RETURN": ("实际资本表", "认可资产表", "最低资本表"),
     "MINIMUM_CAPITAL": (),
 }
@@ -112,11 +141,15 @@ class ExtractedTable:
     evidence: str = ""
     source_pages: list[int] = field(default_factory=list)
     unit_records: list[UnitRecord] = field(default_factory=list)
+    profile_strategy_id: str = ""
 
     @property
     def candidate_id(self) -> str:
         pages = "-".join(map(str, self.source_pages or [self.page]))
-        return f"{self.table_id}:{pages}:{self.strategy}:{self.table_index}"
+        return (
+            f"{self.table_id}:{pages}:{self.profile_strategy_id}:"
+            f"{self.strategy}:{self.table_index}"
+        )
 
 
     def unit_summary(self) -> str:

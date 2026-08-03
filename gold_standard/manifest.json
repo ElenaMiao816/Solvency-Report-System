@@ -1,0 +1,225 @@
+{
+  "version": "1.0",
+  "description": "真实偿付能力PDF金标准。PDF不入库，以SHA256匹配；页码均为PDF物理页码。",
+  "cases": [
+    {
+      "case_id": "xiaokang_life_2026_q1_scan",
+      "pdf_filename": "小康人寿2026Q1偿付能力季度报告摘要.pdf",
+      "sha256": "320da880655a7624da19939bbf6e9e1b1631845a96ce4e0a00ad97861671deb6",
+      "company": "小康人寿保险有限责任公司",
+      "report_period": "2026Q1",
+      "page_count": 20,
+      "document_type": "纯扫描PDF",
+      "verification": "2026-07-24逐页视觉核对",
+      "tables": {
+        "SOLVENCY_MAIN": {
+          "pages": [8],
+          "required_items": [
+            "认可资产",
+            "认可负债",
+            "实际资本",
+            "最低资本",
+            "核心偿付能力充足率",
+            "综合偿付能力充足率"
+          ],
+          "expected_values": [
+            {"item": "实际资本", "value": "3,593,086,798.99"},
+            {"item": "最低资本", "value": "1,351,447,299.44"},
+            {"item": "综合偿付能力充足率", "value": "265.87"}
+          ]
+        },
+        "OPERATING_METRICS": {
+          "pages": [9],
+          "required_items": [
+            "保险业务收入",
+            "净利润",
+            "总资产",
+            "净资产",
+            "投资收益率",
+            "综合投资收益率"
+          ]
+        },
+        "ACTUAL_CAPITAL": {
+          "pages": [17],
+          "required_items": [
+            "核心一级资本",
+            "核心二级资本",
+            "附属一级资本",
+            "附属二级资本",
+            "实际资本合计"
+          ],
+          "expected_values": [
+            {"item": "实际资本合计", "value": "3,593,086,798.99"}
+          ]
+        },
+        "THREE_YEAR_INVESTMENT_RETURN": {
+          "pages": [9],
+          "required_items": [
+            "近三年平均投资收益率",
+            "近三年平均综合投资收益率"
+          ],
+          "expected_values": [
+            {"item": "近三年平均投资收益率", "value": "6.74%"},
+            {"item": "近三年平均综合投资收益率", "value": "8.92%"}
+          ]
+        },
+        "MINIMUM_CAPITAL": {
+          "pages": [20],
+          "required_items": [
+            "量化风险最低资本",
+            "保险风险最低资本",
+            "市场风险最低资本",
+            "信用风险最低资本",
+            "控制风险最低资本",
+            "附加资本",
+            "最低资本"
+          ],
+          "expected_values": [
+            {"item": "最低资本", "value": "1,351,447,299.44"}
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "changsheng_life_2026_q1_core_capital_only",
+      "pdf_filename": "长生人寿2026Q1偿付能力季度报告摘要.pdf",
+      "sha256": "f7f135e68b2dd82dc67d71367b6e4fcbdcca7c76acf3dadf68f2a52484fdd9b5",
+      "company": "长生人寿保险有限公司",
+      "report_period": "2026Q1",
+      "page_count": 30,
+      "document_type": "文字型PDF",
+      "verification": "2026-07-27逐页视觉与文本网格核对",
+      "tables": {
+        "ACTUAL_CAPITAL": {
+          "pages": [26],
+          "required_items": [
+            "核心一级资本",
+            "核心二级资本",
+            "附属一级资本",
+            "附属二级资本",
+            "实际资本合计"
+          ],
+          "expected_values": [
+            {"item": "核心一级资本", "value": "31,769"},
+            {"item": "实际资本合计", "value": "40,302"}
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "citic_prudential_2026_q1_exclude_top_products",
+      "pdf_filename": "中信保诚2026Q1偿付能力季度报告摘要.pdf",
+      "sha256": "ebe5a682baa7a44363c165848e078d56fd00e5599883f61b2049fb252b6c1d7e",
+      "company": "中信保诚人寿保险有限公司",
+      "report_period": "2026Q1",
+      "page_count": 30,
+      "document_type": "文字型PDF",
+      "verification": "2026-07-27逐页视觉与文本网格核对",
+      "tables": {
+        "OPERATING_METRICS": {
+          "pages": [13],
+          "excluded_pages": [14],
+          "excluded_items": ["前五大产品的信息"],
+          "required_items": [
+            "保险业务收入",
+            "净利润",
+            "总资产",
+            "净资产",
+            "综合投资收益率",
+            "新业务价值",
+            "分渠道的签单保费",
+            "营销员脱落率"
+          ],
+          "expected_values": [
+            {"item": "保险业务收入", "value": "152"},
+            {"item": "营销员脱落率", "value": "7.79%"}
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "boc_samsung_2026_q1_two_sentence_return",
+      "pdf_filename": "中银三星2026Q1偿付能力季度报告摘要.pdf",
+      "sha256": "66595c5a2f83cfdc4072c4166d22eba8c7dc82bf570d1af4665a0ad0d8d9822c",
+      "company": "中银三星人寿保险有限公司",
+      "report_period": "2026Q1",
+      "page_count": 23,
+      "document_type": "文字型PDF",
+      "verification": "2026-07-27逐页视觉与文本核对",
+      "tables": {
+        "THREE_YEAR_INVESTMENT_RETURN": {
+          "pages": [12],
+          "excluded_pages": [11],
+          "required_items": [
+            "近三年平均投资收益率",
+            "近三年平均综合投资收益率"
+          ],
+          "expected_values": [
+            {"item": "近三年平均投资收益率", "value": "4.00%"},
+            {"item": "近三年平均综合投资收益率", "value": "4.93%"}
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "china_post_life_2026_q1_operating_footnote",
+      "pdf_filename": "中邮人寿2026Q1偿付能力季度报告摘要.pdf",
+      "sha256": "06594681fea8dfa234d71cbcae47be3da359e12759f408e724ceba6ede74d501",
+      "company": "中邮人寿保险股份有限公司",
+      "report_period": "2026Q1",
+      "page_count": 29,
+      "document_type": "文字型PDF",
+      "verification": "2026-07-27逐页视觉与文本网格核对",
+      "tables": {
+        "OPERATING_METRICS": {
+          "pages": [13, 14],
+          "excluded_items": [
+            "第一大产品的信息",
+            "第二大产品的信息",
+            "报告数据披露根据2020年修订"
+          ],
+          "required_items": [
+            "保险业务收入",
+            "净利润",
+            "总资产",
+            "净资产",
+            "综合投资收益率",
+            "剩余边际",
+            "新业务价值",
+            "分渠道的签单保费",
+            "其他渠道",
+            "综合退保率",
+            "营销员脱落率"
+          ],
+          "expected_values": [
+            {"item": "保险业务收入", "value": "8,990,429.26"},
+            {"item": "综合投资收益率", "value": "0.40%"},
+            {"item": "其他渠道", "value": "60,254.87"},
+            {"item": "营销员脱落率", "value": "0.00%"}
+          ]
+        },
+        "MINIMUM_CAPITAL": {
+          "pages": [28, 29],
+          "required_items": [
+            "量化风险最低资本",
+            "寿险业务保险风险最低资本合计",
+            "市场风险-最低资本合计",
+            "信用风险-最低资本合计",
+            "控制风险最低资本",
+            "附加资本",
+            "逆周期附加资本",
+            "D-SII附加资本",
+            "G-SII附加资本",
+            "其他附加资本",
+            "最低资本"
+          ],
+          "expected_values": [
+            {"item": "量化风险最低资本", "value": "4,749,908.76"},
+            {"item": "控制风险最低资本", "value": "29,479.19"},
+            {"item": "最低资本", "value": "4,779,387.95"}
+          ]
+        }
+      }
+    }
+  ]
+}
