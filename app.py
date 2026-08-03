@@ -5,6 +5,8 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
+from time import perf_counter
 import fitz
 
 import pandas as pd
@@ -12,6 +14,13 @@ import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 
+from services.report_profiles import (
+    ProfileValidationError,
+    ReportProfile,
+    load_profile_registry,
+    load_profile_workbook,
+    profile_workbook_bytes,
+)
 from services.solvency_ai_table_extractor import (
     extraction_logs_frame,
     reconstructed_workbook_bytes,
@@ -20,14 +29,22 @@ from services.solvency_hybrid_pipeline import (
     extract_tables_hybrid,
     locate_tables_hybrid,
 )
+from services.solvency_gold_standard import (
+    evaluate_gold_case,
+    find_gold_case,
+    load_gold_manifest,
+)
 from services.solvency_normalizer import (
-    LIFE_COMPANY_TYPES,
     STANDARD_COLUMNS,
     load_taxonomy,
     normalize_tables,
     standardize_uploaded_frame,
 )
-from services.solvency_pdf_locator import PageMatch, extract_report_metadata, load_page_features
+from services.solvency_pdf_locator import (
+    PageMatch,
+    extract_report_metadata,
+    report_identity_warning,
+)
 from services.solvency_validator import load_validation_rules, validate_standard_data
 from step7_solvency import show_step_7_solvency
 from step8_solvency import show_step_8_solvency
@@ -35,12 +52,9 @@ from step8_solvency import show_step_8_solvency
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_DIR = ROOT / "config"
-TEMPLATE_DIR = ROOT / "templates"
-FEATURE_CONFIG = CONFIG_DIR / "solvency_page_features.json"
-TAXONOMY_FILE = CONFIG_DIR / "solvency_taxonomy.xlsx"
-RULES_FILE = CONFIG_DIR / "solvency_validation_rules.xlsx"
-COMPANY_URL_FILE = CONFIG_DIR / "solvency_company_urls.xlsx"
-STANDARD_TEMPLATE = TEMPLATE_DIR / "偿付能力季度报告标准目标表.xlsx"
+PROFILE_DIR = CONFIG_DIR / "report_profiles"
+DEFAULT_PROFILE_ID = "LIFE_SOLVENCY"
+GOLD_MANIFEST = ROOT / "gold_standard" / "manifest.json"
 
 
 st.set_page_config(page_title="偿付能力报告平台", page_icon="🛡️", layout="wide")
@@ -79,7 +93,14 @@ def initialize_state() -> None:
         "monitor_results": pd.DataFrame(),
         "monitor_single_result": None,
         "edited_pages": {},
+        "pages_confirmed": False,
+        "normalization_diagnostics": pd.DataFrame(),
         "locator_config_version": "",
+        "extraction_grid_cache": {},
+        "extraction_image_cache": {},
+        "extraction_cache_lock": Lock(),
+        "active_profile_id": DEFAULT_PROFILE_ID,
+        "active_profile_runtime": "",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -87,29 +108,83 @@ def initialize_state() -> None:
 
 
 @st.cache_data(show_spinner=False)
-def read_taxonomy() -> pd.DataFrame:
-    return load_taxonomy(TAXONOMY_FILE)
+def read_profile_registry() -> dict[str, ReportProfile]:
+    return load_profile_registry(PROFILE_DIR, ROOT)
 
 
 @st.cache_data(show_spinner=False)
-def read_rules() -> pd.DataFrame:
-    return load_validation_rules(RULES_FILE)
+def read_uploaded_profile(
+    workbook_bytes: bytes,
+    source_name: str,
+) -> ReportProfile:
+    return load_profile_workbook(
+        workbook_bytes,
+        project_root=ROOT,
+        source_name=source_name,
+    )
 
 
 @st.cache_data(show_spinner=False)
-def read_companies() -> pd.DataFrame:
-    companies = pd.read_excel(COMPANY_URL_FILE, sheet_name="公司网址", header=2)
-    required = ["公司", "公司类别", "偿付能力披露地址"]
+def export_profile_workbook(profile: ReportProfile) -> bytes:
+    return profile_workbook_bytes(profile)
+
+
+@st.cache_data(show_spinner=False)
+def read_taxonomy(path: str) -> pd.DataFrame:
+    return load_taxonomy(path)
+
+
+@st.cache_data(show_spinner=False)
+def read_rules(path: str) -> pd.DataFrame:
+    return load_validation_rules(path)
+
+
+@st.cache_data(show_spinner=False)
+def read_gold_manifest() -> dict:
+    return load_gold_manifest(GOLD_MANIFEST) if GOLD_MANIFEST.exists() else {"cases": []}
+
+
+@st.cache_data(show_spinner=False)
+def read_companies(
+    source_path: str,
+    sheet_name: str,
+    header: int,
+    company_column: str,
+    company_type_column: str,
+    report_url_column: str,
+) -> pd.DataFrame:
+    companies = pd.read_excel(
+        source_path,
+        sheet_name=sheet_name,
+        header=header,
+    )
+    required = [company_column, company_type_column, report_url_column]
     missing = [column for column in required if column not in companies.columns]
     if missing:
         raise ValueError(f"公司网址配置缺少字段：{', '.join(missing)}")
-    companies = companies[required].copy()
-    for column in required:
+    companies = companies[required].rename(columns={
+        company_column: "公司",
+        company_type_column: "公司类别",
+        report_url_column: "报告披露地址",
+    })
+    for column in ("公司", "公司类别", "报告披露地址"):
         companies[column] = companies[column].fillna("").astype(str).str.strip()
     return companies[companies["公司"] != ""].drop_duplicates(subset=["公司"], keep="last").reset_index(drop=True)
 
 
-def target_period_terms(year: int, quarter: str) -> list[str]:
+def target_period_terms(
+    year: int,
+    period: str,
+    frequency: str = "QUARTERLY",
+) -> list[str]:
+    if frequency.upper() == "ANNUAL":
+        return [
+            f"{year}年度",
+            f"{year}年年度报告",
+            f"{year}年年报",
+            f"annualreport{year}",
+        ]
+    quarter = period
     quarter_number = int(quarter[-1])
     chinese_number = {1: "一", 2: "二", 3: "三", 4: "四"}[quarter_number]
     return [
@@ -121,15 +196,26 @@ def target_period_terms(year: int, quarter: str) -> list[str]:
     ]
 
 
-def check_company_report(row: pd.Series, year: int, quarter: str, timeout: int = 15) -> dict:
+def check_company_report(
+    row: pd.Series,
+    year: int,
+    period: str,
+    *,
+    frequency: str = "QUARTERLY",
+    report_name: str = "目标报告",
+    report_terms: tuple[str, ...] = (),
+    timeout: int = 15,
+) -> dict:
     company = str(row.get("公司", "")).strip()
     category = str(row.get("公司类别", "")).strip()
-    url = str(row.get("偿付能力披露地址", "")).strip()
+    url = str(row.get("报告披露地址", "")).strip()
     checked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    target_period = str(year) if frequency.upper() == "ANNUAL" else f"{year}{period}"
     base = {
         "公司": company,
         "公司类别": category,
-        "目标报告期": f"{year}{quarter}",
+        "报告类型": report_name,
+        "目标报告期": target_period,
         "检查结果": "",
         "HTTP状态": "",
         "匹配关键词": "",
@@ -156,7 +242,9 @@ def check_company_report(row: pd.Series, year: int, quarter: str, timeout: int =
         content_type = response.headers.get("Content-Type", "").lower()
         if "application/pdf" in content_type or response.content[:4] == b"%PDF":
             metadata = extract_report_metadata(response.content)
-            matched = metadata.get("报告年度") == year and metadata.get("报告季度") == quarter
+            matched = metadata.get("报告年度") == year
+            if frequency.upper() != "ANNUAL":
+                matched = matched and metadata.get("报告季度") == period
             return {
                 **base,
                 "检查结果": "已更新" if matched else "PDF报告期不匹配",
@@ -171,16 +259,26 @@ def check_company_report(row: pd.Series, year: int, quarter: str, timeout: int =
             for tag in soup.find_all("a")
         )
         searchable = re.sub(r"\s+", "", f"{visible_text} {link_text}")
-        terms = target_period_terms(year, quarter)
+        terms = target_period_terms(year, period, frequency)
         matched_terms = [term for term in terms if term.lower() in searchable.lower()]
-        has_solvency = "偿付能力" in searchable or "solvency" in searchable.lower()
+        normalized_report_terms = tuple(
+            item for item in report_terms if str(item).strip()
+        )
+        has_report_term = (
+            any(
+                str(term).lower() in searchable.lower()
+                for term in normalized_report_terms
+            )
+            if normalized_report_terms
+            else True
+        )
 
-        if matched_terms and has_solvency:
+        if matched_terms and has_report_term:
             result = "已更新"
-            note = "页面中同时发现目标报告期和偿付能力关键词。"
+            note = "页面中同时发现目标报告期和报告类型关键词。"
         elif matched_terms:
             result = "疑似已更新，需人工核对"
-            note = "发现目标报告期，但未在静态页面文本中发现偿付能力关键词。"
+            note = "发现目标报告期，但未在静态页面文本中发现报告类型关键词。"
         else:
             result = "未发现目标报告"
             note = "静态页面未发现目标报告期；动态加载页面或反爬虫网站需人工打开核对。"
@@ -244,10 +342,107 @@ def dataframe_to_xlsx(frame: pd.DataFrame, sheet_name: str) -> bytes:
     return output.getvalue()
 
 
+def read_standard_upload(upload) -> pd.DataFrame:
+    workbook_bytes = upload.getvalue()
+    for header in (0, 2):
+        candidate = pd.read_excel(
+            io.BytesIO(workbook_bytes),
+            sheet_name="标准数据",
+            header=header,
+        )
+        if {"公司", "指标编码", "期间口径"}.issubset(candidate.columns):
+            return candidate
+    raise ValueError(
+        f"{upload.name} 的“标准数据”工作表未找到公司、指标编码和期间口径表头。"
+    )
+
+
 initialize_state()
 
-st.title("🛡️ 偿付能力报告处理与分析平台")
-st.caption("第一阶段版本：季度报告监控、核心表定位、标准化、勾稽、多公司集成及基础分析")
+profiles = read_profile_registry()
+uploaded_profile_file = None
+with st.expander("报告 profile 配置", expanded=False):
+    st.caption(
+        "目标表和定位关键词可以通过配置工作簿维护。上传后先进行结构与引用校验，"
+        "仅在当前浏览器会话中生效，不会覆盖项目内的正式配置。"
+    )
+    uploaded_profile_file = st.file_uploader(
+        "上传报告 profile 配置工作簿",
+        type=["xlsx"],
+        key="report_profile_upload",
+    )
+    if uploaded_profile_file is not None:
+        uploaded_bytes = uploaded_profile_file.getvalue()
+        try:
+            uploaded_profile = read_uploaded_profile(
+                uploaded_bytes,
+                uploaded_profile_file.name,
+            )
+            profiles[uploaded_profile.profile_id] = uploaded_profile
+            st.success(
+                f"配置校验通过：{uploaded_profile.profile_name}，"
+                f"共 {len(uploaded_profile.tables)} 张目标表。"
+            )
+        except ProfileValidationError as exc:
+            st.error(f"配置工作簿未启用：{exc}")
+
+    profile_ids = list(profiles)
+    if st.session_state.active_profile_id not in profile_ids:
+        st.session_state.active_profile_id = profile_ids[0]
+    st.selectbox(
+        "当前报告类型",
+        profile_ids,
+        format_func=lambda profile_id: (
+            f"{profiles[profile_id].profile_name}（{profile_id}）"
+        ),
+        key="active_profile_id",
+    )
+
+active_profile = profiles[st.session_state.active_profile_id]
+if st.session_state.active_profile_runtime != active_profile.runtime_version:
+    st.session_state.active_profile_runtime = active_profile.runtime_version
+    st.session_state.locator_config_version = ""
+    st.session_state.monitor_results = pd.DataFrame()
+    st.session_state.monitor_single_result = None
+    st.session_state.pop("solvency_target_tables", None)
+
+with st.expander("下载或核对当前 profile", expanded=False):
+    st.caption(
+        f"当前版本：{active_profile.config_version}　|　"
+        f"比较范围：同一 profile 内跨公司、跨期　|　"
+        f"目标表：{len(active_profile.tables)} 张"
+    )
+    st.dataframe(
+        pd.DataFrame(active_profile.tables).reindex(
+            columns=["table_id", "table_name", "max_pages"],
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+    st.download_button(
+        "下载当前 profile 配置工作簿",
+        export_profile_workbook(active_profile),
+        f"{active_profile.profile_id}_profile.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        width="stretch",
+    )
+
+taxonomy_path = active_profile.resource_path("normalization", "taxonomy_file")
+rules_path = active_profile.resource_path("validation", "validation_rules_file")
+standard_template_path = active_profile.resource_path(
+    "normalization",
+    "standard_template_file",
+)
+company_source_path = active_profile.resource_path(
+    "monitoring",
+    "company_source_file",
+)
+
+st.title("保险报告处理与分析平台")
+st.caption(
+    f"当前 profile：{active_profile.profile_name}（{active_profile.profile_id}）｜"
+    "支持同一报告类型内跨公司、跨期比较"
+)
 
 tabs = st.tabs([
     "STEP0 报告监控",
@@ -263,12 +458,26 @@ tabs = st.tabs([
 
 
 with tabs[0]:
-    st.subheader("偿付能力季度报告监控")
-    companies = read_companies()
+    st.subheader(f"{active_profile.profile_name}监控")
+    companies = read_companies(
+        str(company_source_path),
+        str(active_profile.monitoring["company_source_sheet"]),
+        int(active_profile.monitoring.get("company_source_header", 0) or 0),
+        str(active_profile.monitoring["company_name_column"]),
+        str(active_profile.monitoring["company_type_column"]),
+        str(active_profile.monitoring["report_url_column"]),
+    )
 
     year_col, quarter_col = st.columns(2)
     target_year = int(year_col.number_input("报告年度", 2020, 2050, 2026))
-    target_quarter = quarter_col.selectbox("报告季度", ["Q1", "Q2", "Q3", "Q4"])
+    if active_profile.frequency.upper() == "ANNUAL":
+        target_period = "ANNUAL"
+        quarter_col.text_input("报告期间", value="年度", disabled=True)
+    else:
+        target_period = quarter_col.selectbox(
+            "报告季度",
+            ["Q1", "Q2", "Q3", "Q4"],
+        )
 
     all_categories = sorted(companies["公司类别"].dropna().unique().tolist())
     selected_categories = st.multiselect(
@@ -283,15 +492,15 @@ with tabs[0]:
 
     st.caption(
         f"系统公司范围共 {len(companies)} 家；当前筛选 {len(filtered_companies)} 家。"
-        "运行时仅使用偿付能力系统自己的公司网址配置。"
+        f"运行时使用 {active_profile.profile_id} 的公司来源配置。"
     )
     st.dataframe(
         filtered_companies,
         width="stretch",
         hide_index=True,
         column_config={
-            "偿付能力披露地址": st.column_config.LinkColumn(
-                "偿付能力披露地址",
+            "报告披露地址": st.column_config.LinkColumn(
+                "报告披露地址",
                 display_text="打开页面",
             )
         },
@@ -313,7 +522,7 @@ with tabs[0]:
         link_col, check_col = st.columns(2)
         link_col.link_button(
             "打开该公司披露页面",
-            selected_row["偿付能力披露地址"],
+            selected_row["报告披露地址"],
             width="stretch",
         )
         if check_col.button(
@@ -326,7 +535,12 @@ with tabs[0]:
                 st.session_state.monitor_single_result = check_company_report(
                     selected_row,
                     target_year,
-                    target_quarter,
+                    target_period,
+                    frequency=active_profile.frequency,
+                    report_name=active_profile.profile_name,
+                    report_terms=tuple(
+                        active_profile.monitoring.get("report_terms", [])
+                    ),
                 )
 
         if st.session_state.monitor_single_result:
@@ -382,8 +596,13 @@ with tabs[0]:
                     check_company_report,
                     row,
                     target_year,
-                    target_quarter,
-                    request_timeout,
+                    target_period,
+                    frequency=active_profile.frequency,
+                    report_name=active_profile.profile_name,
+                    report_terms=tuple(
+                        active_profile.monitoring.get("report_terms", [])
+                    ),
+                    timeout=request_timeout,
                 ): order
                 for order, (_, row) in enumerate(records)
             }
@@ -432,7 +651,8 @@ with tabs[0]:
         st.download_button(
             "下载本次检查结果",
             dataframe_to_xlsx(results, "报告更新检查"),
-            f"偿付能力报告更新检查_{target_year}{target_quarter}.xlsx",
+            f"{active_profile.profile_id}_报告更新检查_"
+            f"{target_year}{'' if target_period == 'ANNUAL' else target_period}.xlsx",
             width="stretch",
         )
 
@@ -442,26 +662,28 @@ with tabs[1]:
     st.subheader("📑 智能页码定位")
     st.caption("系统结合页面语义推断与表格结构雷达定位目标表；跨页页码可在左侧人工修改，右侧同步显示PDF原页。")
 
-    feature_config = load_page_features(FEATURE_CONFIG)
+    feature_config = dict(active_profile.feature_config)
     table_configs = feature_config.get("tables", [])
-    config_version = str(feature_config.get("version", ""))
+    config_version = active_profile.runtime_version
     if st.session_state.locator_config_version != config_version:
         st.session_state.locator_config_version = config_version
         st.session_state.auto_page_matches = []
         st.session_state.page_matches = []
         st.session_state.edited_pages = {}
+        st.session_state.pages_confirmed = False
         st.session_state.raw_tables = []
         st.session_state.ai_extraction_logs = []
         st.session_state.ai_workbook_bytes = b""
         st.session_state.standard_data = pd.DataFrame(columns=STANDARD_COLUMNS)
+        st.session_state.normalization_diagnostics = pd.DataFrame()
         for item in table_configs:
             st.session_state.pop(f"page_edit_{item['table_id']}", None)
     table_config_by_name = {item["table_name"]: item for item in table_configs}
 
     uploaded_pdf = st.file_uploader(
-        "拖拽或选择一份偿付能力季度报告摘要 PDF",
+        f"拖拽或选择一份{active_profile.profile_name} PDF",
         type=["pdf"],
-        key="solvency_pdf",
+        key=f"report_pdf_{active_profile.profile_id}",
     )
 
     if uploaded_pdf is None:
@@ -475,17 +697,34 @@ with tabs[1]:
             st.session_state.auto_page_matches = []
             st.session_state.page_matches = []
             st.session_state.edited_pages = {}
+            st.session_state.pages_confirmed = False
             st.session_state.raw_tables = []
             st.session_state.table_candidates = {}
             st.session_state.selected_table_candidates = {}
             st.session_state.ai_extraction_logs = []
             st.session_state.ai_workbook_bytes = b""
+            st.session_state.extraction_grid_cache = {}
+            st.session_state.extraction_image_cache = {}
+            st.session_state.extraction_cache_lock = Lock()
             st.session_state.standard_data = pd.DataFrame(columns=STANDARD_COLUMNS)
+            st.session_state.normalization_diagnostics = pd.DataFrame()
             for item in table_configs:
                 st.session_state.pop(f"page_edit_{item['table_id']}", None)
 
         total_pages = int(st.session_state.metadata.get("页数", 0) or 0)
         st.caption(f"当前文件：{uploaded_pdf.name}　|　文档共 {total_pages} 页")
+        identity_warning = report_identity_warning(
+            uploaded_pdf.name,
+            st.session_state.metadata,
+        )
+        if identity_warning:
+            st.warning(identity_warning, icon=":material/warning:")
+        gold_case = find_gold_case(incoming, read_gold_manifest())
+        if gold_case:
+            st.success(
+                f"已匹配真实PDF金标准：{gold_case['case_id']}。"
+                "定位和提取结果会自动显示基准对比。"
+            )
         with st.expander("查看自动识别的报告基本信息"):
             st.json(st.session_state.metadata)
 
@@ -494,10 +733,15 @@ with tabs[1]:
         with col_left:
             st.markdown("#### 检索目标设定")
             all_table_names = [item["table_name"] for item in table_configs]
+            required_table_names = [
+                item["table_name"]
+                for item in table_configs
+                if item.get("required", True)
+            ]
             selected_table_names = st.multiselect(
                 "请选择需要定位的报表：",
                 all_table_names,
-                default=all_table_names,
+                default=required_table_names,
                 key="solvency_target_tables",
             )
             selected_configs = [
@@ -547,9 +791,11 @@ with tabs[1]:
                             api_key=st.session_state.llm_api_key,
                             base_url=st.session_state.llm_base_url,
                             model=st.session_state.llm_model,
+                            profile_context=active_profile.locator_context(),
                         )
                         st.session_state.auto_page_matches = matches
                         st.session_state.page_matches = matches
+                        st.session_state.pages_confirmed = False
                         st.session_state.edited_pages = {
                             item.table_id: list(item.pages)
                             for item in matches
@@ -576,12 +822,25 @@ with tabs[1]:
 
                 edited_pages: dict[str, list[int]] = {}
                 updated_matches: list[PageMatch] = []
+                conflict_matches = [
+                    item
+                    for item in st.session_state.auto_page_matches
+                    if item.review_required
+                ]
+                if conflict_matches:
+                    st.warning(
+                        "以下目标的定位证据存在冲突，已隔离等待人工核对："
+                        + "、".join(item.table_name for item in conflict_matches)
+                    )
                 for match in st.session_state.auto_page_matches:
                     input_key = f"page_edit_{match.table_id}"
                     if input_key not in st.session_state:
                         st.session_state[input_key] = ", ".join(map(str, match.pages))
                     raw_value = st.text_input(match.table_name, key=input_key)
                     valid_pages, invalid_values = parse_page_numbers(raw_value, total_pages)
+                    previous_pages = st.session_state.edited_pages.get(match.table_id)
+                    if previous_pages is not None and previous_pages != valid_pages:
+                        st.session_state.pages_confirmed = False
                     edited_pages[match.table_id] = valid_pages
                     updated_matches.append(
                         PageMatch(
@@ -590,24 +849,49 @@ with tabs[1]:
                             pages=valid_pages,
                             score=match.score,
                             evidence=match.evidence,
+                            review_required=match.review_required,
+                            review_reason=match.review_reason,
+                            sources=match.sources,
                         )
                     )
                     auto_text = ", ".join(map(str, match.pages)) if match.pages else "未自动找到"
                     evidence_text = match.evidence or "无明确关键词证据"
                     st.caption(f"自动定位：{auto_text}　|　识别依据：{evidence_text}")
+                    if match.review_required:
+                        st.error(f"定位证据冲突：{match.review_reason}")
                     if invalid_values:
                         st.warning(f"以下页码或内容无效，已忽略：{', '.join(invalid_values)}")
 
                 st.session_state.edited_pages = edited_pages
                 st.session_state.page_matches = updated_matches
 
+                if gold_case:
+                    st.markdown("##### 真实PDF金标准 - 页码定位")
+                    st.dataframe(
+                        evaluate_gold_case(
+                            gold_case,
+                            matches=updated_matches,
+                        ),
+                        width="stretch",
+                        hide_index=True,
+                    )
+
                 if st.button(
                     "确认页码，进入下一步",
                     key="confirm_solvency_pages",
                     width="stretch",
                 ):
+                    st.session_state.pages_confirmed = True
                     valid_count = sum(bool(item.pages) for item in updated_matches)
-                    st.success(f"页码已确认：5类目标中有 {valid_count} 类配置了有效页码。请前往 STEP2 提取表格。")
+                    conflict_note = (
+                        "；定位冲突已由人工确认"
+                        if conflict_matches else ""
+                    )
+                    st.success(
+                        f"页码已确认：{len(updated_matches)}类目标中有"
+                        f" {valid_count} 类配置了有效页码{conflict_note}。"
+                        "请前往 STEP2 提取表格。"
+                    )
 
         with col_right:
             st.markdown("#### 页面预览")
@@ -659,7 +943,7 @@ with tabs[2]:
         "采用逐页结构化提取：每个物理页独立处理，失败页单独进行图片扫描或网格纠错，"
         "所有页面成功后再按人工确认的页码顺序确定性拼接；任何一页失败都不会输出残缺跨页表。"
     )
-    if not st.session_state.page_matches:
+    if not st.session_state.page_matches or not st.session_state.pages_confirmed:
         st.info("请先在 STEP1 上传报告、完成页码定位并人工确认物理页码。")
     else:
         with st.expander("逐页提取与重试设置", expanded=not bool(st.session_state.raw_tables)):
@@ -692,6 +976,7 @@ with tabs[2]:
             else:
                 progress_logs = []
                 try:
+                    extraction_started = perf_counter()
                     with st.status("正在逐页提取并按页码拼接...", expanded=True) as extraction_status:
                         log_slot = st.empty()
 
@@ -712,24 +997,32 @@ with tabs[2]:
                             auto_vision_retry=st.session_state.auto_vision_retry,
                             force_vision=st.session_state.force_vision_mode,
                             progress_callback=report_progress,
+                            _shared_grid_cache=st.session_state.extraction_grid_cache,
+                            _shared_image_cache=st.session_state.extraction_image_cache,
+                            _cache_lock=st.session_state.extraction_cache_lock,
                         )
+                        extraction_elapsed = perf_counter() - extraction_started
                         st.session_state.raw_tables = bundle.tables
                         st.session_state.ai_extraction_logs = bundle.logs
                         st.session_state.ai_workbook_bytes = reconstructed_workbook_bytes(bundle)
                         st.session_state.table_candidates = {}
                         st.session_state.selected_table_candidates = {}
                         st.session_state.standard_data = pd.DataFrame(columns=STANDARD_COLUMNS)
+                        st.session_state.normalization_diagnostics = pd.DataFrame()
 
                         failed = [item for item in bundle.logs if item.status == "失败"]
                         if bundle.tables:
                             extraction_status.update(
-                                label=f"智能提取完成：生成 {len(bundle.tables)} 张标准化中间表",
+                                label=(
+                                    f"智能提取完成：生成 {len(bundle.tables)} 张标准化中间表"
+                                    f"，用时 {extraction_elapsed:.1f} 秒"
+                                ),
                                 state="complete",
                                 expanded=False,
                             )
                         else:
                             extraction_status.update(
-                                label="智能提取未生成可用表格",
+                                label=f"智能提取未生成可用表格，用时 {extraction_elapsed:.1f} 秒",
                                 state="error",
                                 expanded=True,
                             )
@@ -749,6 +1042,21 @@ with tabs[2]:
 
     if st.session_state.raw_tables:
         tables = st.session_state.raw_tables
+        gold_case = find_gold_case(
+            st.session_state.pdf_bytes,
+            read_gold_manifest(),
+        )
+        if gold_case:
+            with st.expander("真实PDF金标准 - 表格提取结果", expanded=True):
+                st.dataframe(
+                    evaluate_gold_case(
+                        gold_case,
+                        matches=st.session_state.page_matches,
+                        tables=tables,
+                    ),
+                    width="stretch",
+                    hide_index=True,
+                )
 
         def format_reconstructed_table(index: int) -> str:
             item = tables[index]
@@ -801,33 +1109,54 @@ with tabs[2]:
             )
 
 with tabs[3]:
-    st.subheader("偿付能力标准化")
-    if STANDARD_TEMPLATE.exists():
-        st.download_button("下载标准目标表模板", STANDARD_TEMPLATE.read_bytes(), STANDARD_TEMPLATE.name)
+    st.subheader(f"{active_profile.profile_name}标准化")
+    if standard_template_path.exists():
+        st.download_button(
+            "下载标准目标表模板",
+            standard_template_path.read_bytes(),
+            standard_template_path.name,
+        )
 
     if (
         "standard_company_type" in st.session_state
-        and st.session_state.standard_company_type not in LIFE_COMPANY_TYPES
+        and st.session_state.standard_company_type not in active_profile.company_types
     ):
         del st.session_state["standard_company_type"]
     company_type = st.segmented_control(
         "公司类型",
-        LIFE_COMPANY_TYPES,
-        default=LIFE_COMPANY_TYPES[0],
+        active_profile.company_types,
+        default=active_profile.company_types[0],
         required=True,
         key="standard_company_type",
     )
     if not st.session_state.raw_tables:
         st.info("请先在 STEP2 完成表格提取。")
     elif st.button("生成标准化长表", type="primary", key="normalize_tables"):
+        normalization_diagnostics: list[dict] = []
         st.session_state.standard_data = normalize_tables(
             st.session_state.raw_tables,
-            read_taxonomy(),
+            read_taxonomy(str(taxonomy_path)),
             st.session_state.metadata,
             company_type,
+            report_profile_id=active_profile.profile_id,
+            diagnostics=normalization_diagnostics,
+        )
+        st.session_state.normalization_diagnostics = pd.DataFrame(
+            normalization_diagnostics
         )
         if st.session_state.standard_data.empty:
             st.warning("未匹配到可标准化的指标，请核对提取表格和指标字典。")
+
+    if not st.session_state.normalization_diagnostics.empty:
+        with st.expander("指标未匹配或歧义诊断", expanded=True):
+            st.warning(
+                "以下项目没有进入正式标准化长表，请补充精确别名或人工确认。"
+            )
+            st.dataframe(
+                st.session_state.normalization_diagnostics,
+                width="stretch",
+                hide_index=True,
+            )
 
     if not st.session_state.standard_data.empty:
         converted_rows = int(
@@ -858,27 +1187,72 @@ with tabs[3]:
 
 
 with tabs[4]:
-    st.subheader("偿付能力勾稽检查")
+    st.subheader(f"{active_profile.profile_name}勾稽检查")
     if st.session_state.standard_data.empty:
         st.info("请先完成 STEP3 标准化。")
     elif st.button("执行勾稽检查", type="primary", key="validate_data"):
-        st.session_state.validation_results = validate_standard_data(st.session_state.standard_data, read_rules())
+        st.session_state.validation_results = validate_standard_data(
+            st.session_state.standard_data,
+            read_rules(str(rules_path)),
+        )
     if not st.session_state.validation_results.empty:
         st.dataframe(st.session_state.validation_results, use_container_width=True, hide_index=True)
         st.download_button("下载勾稽结果", dataframe_to_xlsx(st.session_state.validation_results, "勾稽结果"), "偿付能力勾稽结果.xlsx")
 
 
 with tabs[5]:
-    st.subheader("多公司、多季度数据集成")
+    st.subheader("同一报告类型的多公司、多期间数据集成")
+    st.caption(
+        f"当前仅集成 {active_profile.profile_id}；其他报告 profile 的数据不会参与比较。"
+    )
     uploads = st.file_uploader("上传一个或多个标准数据文件", type=["xlsx"], accept_multiple_files=True, key="integrated_uploads")
     if uploads and st.button("合并标准数据", type="primary", key="merge_standard_data"):
         frames = []
+        skipped_profiles: set[str] = set()
         for upload in uploads:
-            candidate = pd.read_excel(upload, sheet_name="标准数据", header=2)
-            frames.append(standardize_uploaded_frame(candidate))
-        st.session_state.integrated_data = pd.concat(frames, ignore_index=True).drop_duplicates(
-            subset=["公司", "报告期", "指标编码", "期间口径", "来源页码"], keep="last"
-        )
+            candidate = read_standard_upload(upload)
+            standardized = standardize_uploaded_frame(candidate)
+            standardized["报告类型"] = (
+                standardized["报告类型"]
+                .replace("", active_profile.profile_id)
+                .fillna(active_profile.profile_id)
+            )
+            mismatched = set(
+                standardized.loc[
+                    standardized["报告类型"] != active_profile.profile_id,
+                    "报告类型",
+                ].astype(str)
+            )
+            skipped_profiles.update(mismatched)
+            standardized = standardized[
+                standardized["报告类型"] == active_profile.profile_id
+            ]
+            if not standardized.empty:
+                frames.append(standardized)
+        if frames:
+            st.session_state.integrated_data = pd.concat(
+                frames,
+                ignore_index=True,
+            ).drop_duplicates(
+                subset=[
+                    "报告类型",
+                    "公司",
+                    "报告期",
+                    "指标编码",
+                    "期间口径",
+                    "来源页码",
+                ],
+                keep="last",
+            )
+        else:
+            st.session_state.integrated_data = pd.DataFrame(
+                columns=STANDARD_COLUMNS
+            )
+        if skipped_profiles:
+            st.warning(
+                "已跳过其他报告类型的数据："
+                + "、".join(sorted(skipped_profiles))
+            )
     if not st.session_state.integrated_data.empty:
         st.dataframe(st.session_state.integrated_data, use_container_width=True, hide_index=True)
         st.download_button("下载行业集成数据", dataframe_to_xlsx(st.session_state.integrated_data, "标准数据"), "偿付能力行业集成数据.xlsx")

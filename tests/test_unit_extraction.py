@@ -132,6 +132,63 @@ class UnitExtractionTests(unittest.TestCase):
 
         self.assertTrue(unit_recovery_needed(rows, []))
 
+    def test_actual_capital_unit_is_read_from_table_title(self):
+        rows = [
+            ["行次", "项目", "期末数", "期初数"],
+            ["1", "核心一级资本", "6,974,645,244.61", "7,945,195,913.43"],
+            ["5", "实际资本合计", "8,100,000,000.00", "8,000,000,000.00"],
+        ]
+        grid = PageGrid(
+            20,
+            "\n".join([
+                "000|S02-实际资本（元）",
+                "001|行次 项目 期末数 期初数",
+                "002|1 核心一级资本 6,974,645,244.61 7,945,195,913.43",
+                "003|5 实际资本合计 8,100,000,000.00 8,000,000,000.00",
+            ]),
+            20,
+        )
+
+        records = extract_unit_records("ACTUAL_CAPITAL", rows, [grid])
+
+        self.assertTrue(any(
+            record.scope == "表级"
+            and record.normalized_unit == "元"
+            and record.source_text == "S02-实际资本（元）"
+            for record in records
+        ))
+        self.assertFalse(unit_recovery_needed(rows, records))
+
+    def test_mixed_units_are_read_separately_from_operating_title(self):
+        rows = [
+            ["指标名称", "本季度数", "本年度累计数"],
+            ["（一）保险业务收入", "10,103,443,945.92", "10,103,443,945.92"],
+            ["（九）投资收益率", "0.53", "0.53"],
+            ["（十）综合投资收益率", "0.36", "0.36"],
+        ]
+        grid = PageGrid(
+            11,
+            "\n".join([
+                "000|（四）其他经营指标（元，%）",
+                "001|指标名称 本季度数 本年度累计数",
+                "002|（一）保险业务收入 10,103,443,945.92 10,103,443,945.92",
+                "003|（九）投资收益率 0.53 0.53",
+                "004|（十）综合投资收益率 0.36 0.36",
+            ]),
+            26,
+        )
+
+        records = extract_unit_records("OPERATING_METRICS", rows, [grid])
+        title_units = {
+            record.normalized_unit
+            for record in records
+            if record.scope == "表级"
+            and record.source_text == "（四）其他经营指标（元，%）"
+        }
+
+        self.assertEqual(title_units, {"元", "%"})
+        self.assertFalse(unit_recovery_needed(rows, records))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -144,6 +144,28 @@ class SolvencyNormalizerTests(unittest.TestCase):
         self.assertEqual(result.iloc[0]["数值"], 25_000)
         self.assertEqual(result.iloc[0]["备注"], "未识别原始单位，数值未换算")
 
+    def test_mixed_table_units_are_selected_by_metric_type(self):
+        result = self._normalize(
+            [
+                ["项目", "期末数"],
+                ["核心一级资本", "100,000,000"],
+                ["综合偿付能力充足率", "130"],
+            ],
+            [
+                self._unit("表级", "", "元"),
+                self._unit("表级", "", "%"),
+            ],
+        )
+
+        capital = result[result["指标编码"] == "CORE_T1_CAPITAL"].iloc[0]
+        ratio = result[result["指标编码"] == "SOLVENCY_RATIO"].iloc[0]
+        self.assertEqual(capital["报告类型"], "LIFE_SOLVENCY")
+        self.assertEqual(capital["数值"], 10_000)
+        self.assertIn("原单位：元", capital["备注"])
+        self.assertEqual(ratio["数值"], 130)
+        self.assertEqual(ratio["单位"], "%")
+        self.assertEqual(ratio["备注"], "")
+
     def test_only_life_company_types_are_accepted(self):
         result = self._normalize(
             [["项目", "期末数（万元）"], ["核心一级资本", "1"]],

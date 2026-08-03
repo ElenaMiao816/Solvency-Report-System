@@ -48,7 +48,7 @@ class ScannedPdfLocatorTests(unittest.TestCase):
     @patch("services.solvency_hybrid_pipeline._render_locator_images")
     @patch("services.solvency_hybrid_pipeline._solvency_radar")
     @patch("services.solvency_hybrid_pipeline.locate_tables")
-    def test_pure_scan_uses_two_stage_vision_and_returns_physical_page(
+    def test_pure_scan_uses_directory_prescan_and_two_stage_vision(
         self,
         mock_local,
         mock_radar,
@@ -81,8 +81,9 @@ class ScannedPdfLocatorTests(unittest.TestCase):
         self.assertEqual(matches[0].pages, [2])
         self.assertIn("图片候选扫描：2", matches[0].evidence)
         self.assertIn("图片候选确认：2", matches[0].evidence)
+        self.assertIn("目录换算候选：2", matches[0].evidence)
         self.assertIn("3/3个低文本页", message)
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 3)
         self.assertTrue(any(
             isinstance(message_item.get("content"), list)
             for payload in calls

@@ -7,6 +7,28 @@ import numpy as np
 import pandas as pd
 
 
+EXTRA_VALIDATION_RULES = [
+    {
+        "规则ID": "DUPLICATE_ACTUAL_CAPITAL",
+        "规则名称": "实际资本跨表一致性",
+        "适用期间": "本季度末数|上季度末数|下季度末预测数|下季度预测数|期末数|期初数",
+        "容差": 1,
+        "容差单位": "万元",
+        "启用": "是",
+        "规则说明": "主要指标表与实际资本表披露的实际资本应一致",
+    },
+    {
+        "规则ID": "DUPLICATE_MINIMUM_CAPITAL",
+        "规则名称": "最低资本跨表一致性",
+        "适用期间": "本季度末数|上季度末数|下季度末预测数|下季度预测数|期末数|期初数",
+        "容差": 1,
+        "容差单位": "万元",
+        "启用": "是",
+        "规则说明": "主要指标表与最低资本表披露的最低资本应一致",
+    },
+]
+
+
 @dataclass
 class ValidationResult:
     rule_id: str
@@ -24,7 +46,15 @@ class ValidationResult:
 
 
 def load_validation_rules(path: str | Path) -> pd.DataFrame:
-    return pd.read_excel(path, sheet_name="勾稽规则", header=2).fillna("")
+    frame = pd.read_excel(path, sheet_name="勾稽规则", header=2).fillna("")
+    existing = set(frame.get("规则ID", pd.Series(dtype=str)).astype(str))
+    additions = [
+        item for item in EXTRA_VALIDATION_RULES
+        if item["规则ID"] not in existing
+    ]
+    if additions:
+        frame = pd.concat([frame, pd.DataFrame(additions)], ignore_index=True)
+    return frame.fillna("")
 
 
 def _metric_value(frame: pd.DataFrame, code: str, period: str):
@@ -33,6 +63,21 @@ def _metric_value(frame: pd.DataFrame, code: str, period: str):
         return np.nan
     values = pd.to_numeric(rows["数值"], errors="coerce").dropna()
     return values.iloc[0] if not values.empty else np.nan
+
+
+def _metric_values(frame: pd.DataFrame, code: str, period: str) -> list[float]:
+    rows = frame[(frame["指标编码"] == code) & (frame["期间口径"] == period)]
+    return [
+        float(value)
+        for value in pd.to_numeric(rows["数值"], errors="coerce").dropna()
+    ]
+
+
+def _duplicate_extremes(frame: pd.DataFrame, code: str, period: str):
+    values = _metric_values(frame, code, period)
+    if len(values) < 2:
+        return np.nan, np.nan
+    return max(values), min(values)
 
 
 def validate_standard_data(frame: pd.DataFrame, rules: pd.DataFrame) -> pd.DataFrame:
@@ -67,6 +112,12 @@ def validate_standard_data(frame: pd.DataFrame, rules: pd.DataFrame) -> pd.DataF
             _metric_value(frame, "MINIMUM_CAPITAL", p),
             _metric_value(frame, "QUANT_RISK_CAPITAL", p) + _metric_value(frame, "CONTROL_RISK_CAPITAL", p) + _metric_value(frame, "ADDITIONAL_CAPITAL", p),
         ),
+        "DUPLICATE_ACTUAL_CAPITAL": lambda p: _duplicate_extremes(
+            frame, "ACTUAL_CAPITAL", p
+        ),
+        "DUPLICATE_MINIMUM_CAPITAL": lambda p: _duplicate_extremes(
+            frame, "MINIMUM_CAPITAL", p
+        ),
     }
 
     for _, rule in rules.iterrows():
@@ -80,7 +131,14 @@ def validate_standard_data(frame: pd.DataFrame, rules: pd.DataFrame) -> pd.DataF
             try:
                 actual, expected = rule_functions[rule_id](period)
                 if pd.isna(actual) or pd.isna(expected):
-                    status, difference, notes = "缺失", None, "缺少勾稽所需指标"
+                    if rule_id.startswith("DUPLICATE_"):
+                        status, difference, notes = (
+                            "不适用",
+                            None,
+                            "该期间仅发现一处披露，无法执行跨表一致性检查",
+                        )
+                    else:
+                        status, difference, notes = "缺失", None, "缺少勾稽所需指标"
                 else:
                     difference = float(actual - expected)
                     status = "通过" if abs(difference) <= tolerance else "未通过"
