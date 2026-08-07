@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from contextvars import ContextVar
-from dataclasses import dataclass
-from typing import Any, Callable, TypeVar
+from dataclasses import dataclass, replace
+from typing import Any, Callable, Mapping, TypeVar
 
 from .table_strategy_handlers import (
     ACTUAL_CAPITAL_BOUNDARY_HANDLER,
@@ -74,7 +74,11 @@ class TableStrategy:
     completeness_handler: CompletenessHandler
     stages: tuple[str, ...] = SUPPORTED_STAGES
 
-    def resolve(self, table_id: str) -> "ResolvedTableStrategy":
+    def resolve(
+        self,
+        table_id: str,
+        table_config: Mapping[str, Any] | None = None,
+    ) -> "ResolvedTableStrategy":
         normalized_table_id = str(table_id or "").strip()
         if not normalized_table_id:
             raise StrategyRegistryError("目标表 table_id 不能为空。")
@@ -92,6 +96,7 @@ class TableStrategy:
             postprocess_handler=self.postprocess_handler,
             completeness_handler=self.completeness_handler,
             stages=self.stages,
+            table_config=dict(table_config or {}),
         )
 
 
@@ -105,24 +110,30 @@ class ResolvedTableStrategy:
     postprocess_handler: PostprocessHandler
     completeness_handler: CompletenessHandler
     stages: tuple[str, ...]
+    table_config: Mapping[str, Any]
+
+    def _configured(self, request: T) -> T:
+        if not self.table_config:
+            return request
+        return replace(request, table_config=dict(self.table_config))
 
     def build_prompt(self, request: PromptRequest) -> str:
-        return self.prompt_handler(request)
+        return self.prompt_handler(self._configured(request))
 
     def enforce_boundaries(
         self,
         request: BoundaryRequest,
     ) -> tuple[list[list[str]], str]:
-        return self.boundary_handler(request)
+        return self.boundary_handler(self._configured(request))
 
     def postprocess(
         self,
         request: PostprocessRequest,
     ) -> tuple[list[list[str]], tuple[str, ...]]:
-        return self.postprocess_handler(request)
+        return self.postprocess_handler(self._configured(request))
 
     def validate_completeness(self, request: CompletenessRequest) -> Any:
-        return self.completeness_handler(request)
+        return self.completeness_handler(self._configured(request))
 
     def run(
         self,
@@ -198,6 +209,7 @@ class TableStrategyRegistry:
         self,
         table_id: str,
         strategy_id: str | None = None,
+        table_config: Mapping[str, Any] | None = None,
     ) -> ResolvedTableStrategy:
         normalized_table_id = str(table_id or "").strip()
         configured_strategy_id = str(strategy_id or "").strip()
@@ -206,7 +218,10 @@ class TableStrategyRegistry:
                 normalized_table_id,
                 GENERIC_GRID_STRATEGY_ID,
             )
-        return self.get(configured_strategy_id).resolve(normalized_table_id)
+        return self.get(configured_strategy_id).resolve(
+            normalized_table_id,
+            table_config,
+        )
 
     def default_strategy_id(self, table_id: str) -> str:
         return self.resolve(table_id).strategy_id
@@ -297,8 +312,9 @@ TABLE_STRATEGIES.register(
 def resolve_table_strategy(
     table_id: str,
     strategy_id: str | None = None,
+    table_config: Mapping[str, Any] | None = None,
 ) -> ResolvedTableStrategy:
-    return TABLE_STRATEGIES.resolve(table_id, strategy_id)
+    return TABLE_STRATEGIES.resolve(table_id, strategy_id, table_config)
 
 
 def registered_table_strategies() -> tuple[TableStrategy, ...]:

@@ -28,6 +28,7 @@ class PageMatch:
     review_reason: str = ""
     sources: dict[str, list[int]] = field(default_factory=dict)
     strategy_id: str = ""
+    table_config: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -315,7 +316,7 @@ def _expand_to_item_boundaries(
 ) -> list[tuple[int, float, list[str]]]:
     """Use first/last business items to deterministically close cross-page ranges."""
     table_id = str(table.get("table_id", ""))
-    variants = boundary_variants(table_id)
+    variants = tuple(table.get("boundary_variants") or boundary_variants(table_id))
     if not variants:
         return selected
 
@@ -652,6 +653,7 @@ def locate_tables(pdf_bytes: bytes, feature_config: dict) -> list[PageMatch]:
             score=round(best_score, 2),
             evidence=evidence,
             strategy_id=str(table.get("strategy_id", "")),
+            table_config=dict(table),
         ))
     return results
 

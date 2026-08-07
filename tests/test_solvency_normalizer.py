@@ -181,6 +181,26 @@ class SolvencyNormalizerTests(unittest.TestCase):
                 company_type="财险",
             )
 
+    def test_profile_can_explicitly_enable_non_life_company_type(self):
+        table = ExtractedTable(
+            table_id="TEST",
+            table_name="测试表",
+            page=1,
+            table_index=1,
+            rows=[["项目", "期末数（万元）"], ["核心一级资本", "1"]],
+            source_pages=[1],
+        )
+        result = normalize_tables(
+            [table],
+            self.taxonomy,
+            self.metadata,
+            "财产保险",
+            report_profile_id="NON_LIFE_SOLVENCY",
+            allowed_company_types=("财险",),
+        )
+        self.assertEqual(result.iloc[0]["公司类型"], "财险")
+        self.assertEqual(result.iloc[0]["报告类型"], "NON_LIFE_SOLVENCY")
+
 
 if __name__ == "__main__":
     unittest.main()

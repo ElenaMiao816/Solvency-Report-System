@@ -4,20 +4,25 @@ import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 import pandas as pd
 
 from .solvency_table_extractor import ExtractedTable
+from .solvency_company_identity import apply_company_identities, resolve_company_identity
 
 
 STANDARD_COLUMNS = [
-    "公司", "公司类型", "报告类型", "报告年度", "报告季度", "报告期", "披露日期",
+    "公司", "原始公司名称", "标准公司名称", "公司统一编码", "公司类型", "同业分类",
+    "报告类型", "报告年度", "报告季度", "报告期", "披露日期",
     "一级模块", "二级模块", "行次", "指标编码", "指标名称", "期间口径",
     "数值", "单位", "数据类型", "是否预测", "来源页码", "原始披露值", "备注",
+    "来源类型", "指标属性", "来源文件", "来源工作表", "导入批次", "计算逻辑",
 ]
 
 LIFE_COMPANY_TYPES = ("寿险", "健康险", "养老险")
+NON_LIFE_COMPANY_TYPES = ("财险",)
 
 _COMPANY_TYPE_ALIASES = {
     "寿险": "寿险",
@@ -25,6 +30,10 @@ _COMPANY_TYPE_ALIASES = {
     "健康险": "健康险",
     "养老": "养老险",
     "养老险": "养老险",
+    "财险": "财险",
+    "财产险": "财险",
+    "财产保险": "财险",
+    "非寿险": "财险",
 }
 
 _CURRENCY_UNIT_IN_YUAN = {
@@ -74,6 +83,10 @@ TABLE_ALLOWED_CODES = {
         "CORE_T2_CAPITAL",
         "ANC_T1_CAPITAL",
         "ANC_T2_CAPITAL",
+        "POLICY_SURPLUS_CORE_T1",
+        "POLICY_SURPLUS_CORE_T2",
+        "POLICY_SURPLUS_ANC_T1",
+        "POLICY_SURPLUS_ANC_T2",
     },
     "THREE_YEAR_INVESTMENT_RETURN": {
         "INVESTMENT_RETURN",
@@ -123,10 +136,15 @@ def _normalize_label(value: str) -> str:
     return re.sub(r"[\s：:（）()、，,。·—\-_/]", "", text)
 
 
-def normalize_company_type(company_type: str) -> str:
-    normalized = _COMPANY_TYPE_ALIASES.get(str(company_type or "").strip())
-    if normalized not in LIFE_COMPANY_TYPES:
-        supported = "、".join(LIFE_COMPANY_TYPES)
+def normalize_company_type(
+    company_type: str,
+    allowed_company_types: Sequence[str] | None = None,
+) -> str:
+    raw = str(company_type or "").strip()
+    normalized = _COMPANY_TYPE_ALIASES.get(raw, raw)
+    supported_types = tuple(allowed_company_types or LIFE_COMPANY_TYPES)
+    if normalized not in supported_types:
+        supported = "、".join(supported_types)
         raise ValueError(f"公司类型仅支持：{supported}")
     return normalized
 
@@ -336,8 +354,14 @@ def normalize_tables(
     company_type: str = "寿险",
     report_profile_id: str = "LIFE_SOLVENCY",
     diagnostics: list[dict] | None = None,
+    allowed_company_types: Sequence[str] | None = None,
+    peer_group: str = "",
 ) -> pd.DataFrame:
-    company_type = normalize_company_type(company_type)
+    company_type = normalize_company_type(company_type, allowed_company_types)
+    company_identity = resolve_company_identity(
+        metadata.get("公司", ""),
+        fallback_company_type=company_type,
+    )
     records: list[dict] = []
     candidates = _taxonomy_candidates(taxonomy)
     for table in tables:
@@ -427,8 +451,12 @@ def normalize_tables(
                 elif period.endswith("/非认可"):
                     period = period.removesuffix("/非认可") + "-非认可"
                 records.append({
-                    "公司": metadata.get("公司", ""),
-                    "公司类型": company_type,
+                    "公司": company_identity.standard_name,
+                    "原始公司名称": company_identity.original_name,
+                    "标准公司名称": company_identity.standard_name,
+                    "公司统一编码": company_identity.company_code,
+                    "公司类型": company_identity.company_type,
+                    "同业分类": peer_group,
                     "报告类型": report_profile_id,
                     "报告年度": metadata.get("报告年度"),
                     "报告季度": metadata.get("报告季度", ""),
@@ -447,6 +475,12 @@ def normalize_tables(
                     "来源页码": "、".join(map(str, table.source_pages)) if table.source_pages else table.page,
                     "原始披露值": raw_value,
                     "备注": note,
+                    "来源类型": "报告提取",
+                    "指标属性": "披露",
+                    "来源文件": metadata.get("来源文件", ""),
+                    "来源工作表": table.table_name,
+                    "导入批次": metadata.get("导入批次", ""),
+                    "计算逻辑": "",
                 })
     return pd.DataFrame(records, columns=STANDARD_COLUMNS)
 
@@ -457,4 +491,11 @@ def standardize_uploaded_frame(frame: pd.DataFrame) -> pd.DataFrame:
         if column not in result.columns:
             result[column] = ""
     return result[STANDARD_COLUMNS]
+
+
+def upgrade_standard_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Upgrade a saved/session DataFrame to the current standard schema."""
+    if not isinstance(frame, pd.DataFrame):
+        return pd.DataFrame(columns=STANDARD_COLUMNS)
+    return apply_company_identities(standardize_uploaded_frame(frame))
 

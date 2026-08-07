@@ -18,6 +18,7 @@ class PromptRequest:
     pages: tuple[int, ...] = ()
     page_number: int = 0
     retry_reason: str = ""
+    table_config: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class BoundaryRequest:
     grid_text: str = ""
     source_grids: Any = None
     require_complete: bool = True
+    table_config: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,7 @@ class PostprocessRequest:
     normalize_three_year: Callable[..., tuple[list[list[str]], str]] | None = None
     recover_minimum_capital: Callable[..., tuple[list[list[str]], str]] | None = None
     trim_adjacent: Callable[..., tuple[list[list[str]], str]] | None = None
+    table_config: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -50,6 +53,7 @@ class CompletenessRequest:
     ragged_ratio: float = 0.0
     signatures: tuple[str, ...] = ()
     validator_kwargs: Mapping[str, Any] = field(default_factory=dict)
+    table_config: Mapping[str, Any] = field(default_factory=dict)
 
 
 PromptHandler = Callable[[PromptRequest], str]
@@ -67,12 +71,99 @@ _PAGE_UNIT_NOTE = (
 )
 
 
+def _config_text(
+    config: Mapping[str, Any],
+    key: str,
+    default: str = "",
+) -> str:
+    value = config.get(key)
+    if value is None:
+        return default
+    text = str(value).strip()
+    return text if text else default
+
+
+def _config_bool(
+    config: Mapping[str, Any],
+    key: str,
+    default: bool,
+) -> bool:
+    if key not in config or config.get(key) in (None, ""):
+        return default
+    value = config.get(key)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {
+        "1", "true", "yes", "y", "是", "启用",
+    }
+
+
+def _config_float(
+    config: Mapping[str, Any],
+    key: str,
+    default: float | None,
+) -> float | None:
+    if key not in config or config.get(key) in (None, ""):
+        return default
+    return float(config[key])
+
+
+def _config_terms(
+    config: Mapping[str, Any],
+    key: str,
+    default: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    if key not in config:
+        return default
+    value = config.get(key)
+    if isinstance(value, str):
+        return tuple(
+            item.strip()
+            for item in re.split(r"[|\n\r]+", value)
+            if item.strip()
+        )
+    return tuple(str(item).strip() for item in value or () if str(item).strip())
+
+
+def _config_actions(
+    config: Mapping[str, Any],
+    key: str,
+    default: tuple[str, ...],
+) -> tuple[str, ...]:
+    return _config_terms(config, key, default)
+
+
 def make_prompt_handler(
     *,
     full_table_note: str = "",
     single_page_note: str = "",
 ) -> PromptHandler:
     def build_prompt(request: PromptRequest) -> str:
+        config = request.table_config
+        configured_full_note = _config_text(
+            config,
+            "prompt_full_table_note",
+            full_table_note,
+        )
+        configured_page_note = _config_text(
+            config,
+            "prompt_single_page_note",
+            single_page_note,
+        )
+        prompt_role = _config_text(
+            config,
+            "prompt_role",
+            "四大会计师事务所的偿付能力报告数字化审阅专家",
+        )
+        profile_instructions = _config_terms(
+            config,
+            "profile_instructions",
+        )
+        profile_note = (
+            "\nProfile补充要求：\n- " + "\n- ".join(profile_instructions)
+            if profile_instructions
+            else ""
+        )
         signatures = "、".join(request.signatures) or (
             "无固定关键词" if request.mode == "full_table" else "以原页面为准"
         )
@@ -83,7 +174,7 @@ def make_prompt_handler(
                 "、".join(request.completeness_terms)
                 or "以原页面完整行数为准"
             )
-            return f"""
+            return f"""你是{prompt_role}。
 目标表ID：{request.table_id}
 目标表名称：{request.table_name}
 物理页码：{list(request.pages)}
@@ -91,8 +182,9 @@ def make_prompt_handler(
 常见表头：{headers}
 不得混入的相邻表内容：{exclusions}
 完整性重点字段：{completeness}（原页面存在时必须全部保留）
-组合范围补充：{full_table_note}
+组合范围补充：{configured_full_note}
 项目边界约束：{request.boundary_text}
+{profile_note}
 
 请对输入的多页PDF进行网格化对齐重构：
 1. 只提取目标表，不得混入同页其他表或正文。
@@ -123,15 +215,16 @@ JSON格式：
             if request.retry_reason
             else ""
         )
-        return f"""你是四大会计师事务所的偿付能力报告数字化审阅专家。
+        return f"""你是{prompt_role}。
 当前任务：只提取PDF物理第{request.page_number}页中属于【{request.table_name}】的表格内容。
 
 核心项目：{signatures}
 常见表头：{headers}
 不得混入：{exclusions}
 项目边界：{request.boundary_text}
-{single_page_note}
+{configured_page_note}
 {retry_note}
+{profile_note}
 
 {_PAGE_UNIT_NOTE}
 【必须遵守】
@@ -154,13 +247,36 @@ def make_boundary_handler(
     require_value_for_boundary_items: bool = False,
 ) -> BoundaryHandler:
     def handle_boundary(request: BoundaryRequest) -> Any:
+        config = request.table_config
+        use_operating_metrics_grid = _config_bool(
+            config,
+            "boundary_operating_metrics_grid",
+            operating_metrics_grid,
+        )
+        use_variant_activation = _config_bool(
+            config,
+            "boundary_respect_variant_activation",
+            respect_variant_activation,
+        )
+        require_boundary_value = _config_bool(
+            config,
+            "boundary_require_value_for_items",
+            require_value_for_boundary_items,
+        )
+        preserve_adjustment = _config_bool(
+            config,
+            "boundary_preserve_adjustment_after_footnote",
+            preserve_adjustment_after_footnote,
+        )
         if request.mode == "grid_slice":
             grid_options = {
-                "operating_metrics": operating_metrics_grid,
+                "operating_metrics": use_operating_metrics_grid,
             }
-            if respect_variant_activation:
+            if config:
+                grid_options["table_config"] = config
+            if use_variant_activation:
                 grid_options["respect_variant_activation"] = True
-            if require_value_for_boundary_items:
+            if require_boundary_value:
                 grid_options["require_value_for_boundary_items"] = True
             return request.engine(
                 request.table_id,
@@ -168,17 +284,25 @@ def make_boundary_handler(
                 **grid_options,
             )
         if request.mode == "source_lines":
+            source_options = {
+                "preserve_adjustment_after_footnote": preserve_adjustment,
+            }
+            if config:
+                source_options["table_config"] = config
             return request.engine(
                 request.table_id,
                 request.source_grids,
-                preserve_adjustment_after_footnote=(
-                    preserve_adjustment_after_footnote
-                ),
+                **source_options,
             )
+        output_options = {
+            "require_complete": request.require_complete,
+        }
+        if config:
+            output_options["table_config"] = config
         return request.engine(
             request.table_id,
             request.rows,
-            require_complete=request.require_complete,
+            **output_options,
         )
 
     return handle_boundary
@@ -220,17 +344,41 @@ def _grid_line_has_two_values(line: str) -> bool:
     return len(values) >= 2
 
 
-def _slice_three_year_return_grid(grid_text: str) -> str | None:
+def _slice_three_year_return_grid(
+    grid_text: str,
+    table_config: Mapping[str, Any] | None = None,
+) -> str | None:
     """Keep explicit near-three-year rows before quarterly metric lookalikes."""
     lines = str(grid_text or "").splitlines()
     if not lines:
         return None
 
-    ordinary_terms = (
+    config = table_config or {}
+    variants = tuple(config.get("boundary_variants") or ())
+    configured_starts = tuple(dict.fromkeys(
+        str(item)
+        for variant in variants
+        for item in variant.get("start_items", ())
+        if str(item).strip()
+    ))
+    configured_ends = tuple(dict.fromkeys(
+        str(item)
+        for variant in variants
+        for item in (
+            *variant.get("end_items", ()),
+            *(
+                term
+                for group in variant.get("end_item_groups", ())
+                for term in group
+            ),
+        )
+        if str(item).strip()
+    ))
+    ordinary_terms = configured_starts or (
         "近三年平均投资收益率",
         "近三年投资收益率",
     )
-    comprehensive_terms = (
+    comprehensive_terms = configured_ends or (
         "近三年平均综合投资收益率",
         "近三年综合投资收益率",
     )
@@ -291,16 +439,28 @@ _SOLVENCY_ADJACENT_TABLE_MARKERS = (
 def _extend_solvency_main_forecast_grid(
     grid_text: str,
     sliced_text: str,
+    table_config: Mapping[str, Any] | None = None,
 ) -> str:
     """Keep a separately disclosed next-quarter forecast subtable."""
     lines = str(grid_text or "").splitlines()
     if not lines:
         return sliced_text
+    config = table_config or {}
+    forecast_markers = _config_terms(
+        config,
+        "forecast_markers",
+        _SOLVENCY_FORECAST_MARKERS,
+    )
+    adjacent_markers = _config_terms(
+        config,
+        "adjacent_table_markers",
+        _SOLVENCY_ADJACENT_TABLE_MARKERS,
+    )
     forecast_start = next(
         (
             index
             for index, line in enumerate(lines)
-            if _grid_line_has_any(line, _SOLVENCY_FORECAST_MARKERS)
+            if _grid_line_has_any(line, forecast_markers)
         ),
         None,
     )
@@ -326,7 +486,7 @@ def _extend_solvency_main_forecast_grid(
             for index in range(forecast_start + 1, len(lines))
             if _grid_line_has_any(
                 lines[index],
-                _SOLVENCY_ADJACENT_TABLE_MARKERS,
+                adjacent_markers,
             )
         ),
         len(lines),
@@ -640,13 +800,31 @@ def make_postprocess_handler(
     def postprocess(
         request: PostprocessRequest,
     ) -> tuple[list[list[str]], tuple[str, ...]]:
+        default_actions = tuple(
+            action
+            for action, enabled in (
+                ("normalize_three_year_return", normalize_three_year),
+                ("recover_minimum_capital_terminal", recover_minimum_capital),
+                ("normalize_actual_capital_total", normalize_actual_capital_total),
+                ("trim_adjacent_rows", request.trim_adjacent is not None),
+            )
+            if enabled
+        )
+        actions = set(_config_actions(
+            request.table_config,
+            "postprocess_actions",
+            default_actions,
+        ))
         rows = request.rows
         notes: list[str] = []
-        if normalize_three_year and request.normalize_three_year:
+        if "normalize_three_year_return" in actions and request.normalize_three_year:
             rows, note = request.normalize_three_year(request.table_id, rows)
             if note:
                 notes.append(note)
-        if recover_minimum_capital and request.recover_minimum_capital:
+        if (
+            "recover_minimum_capital_terminal" in actions
+            and request.recover_minimum_capital
+        ):
             rows, note = request.recover_minimum_capital(
                 request.table_id,
                 rows,
@@ -654,13 +832,13 @@ def make_postprocess_handler(
             )
             if note:
                 notes.append(note)
-        if normalize_actual_capital_total:
+        if "normalize_actual_capital_total" in actions:
             rows, changed = _normalize_actual_capital_total_alias(rows)
             if changed:
                 notes.append(
                     "已将实际资本表末行‘5 合计’标准化为‘5 实际资本合计’"
                 )
-        if request.trim_adjacent:
+        if "trim_adjacent_rows" in actions and request.trim_adjacent:
             rows, note = request.trim_adjacent(request.table_id, rows)
             if note:
                 notes.append(note)
@@ -677,16 +855,39 @@ def make_completeness_handler(
     source_item_recall_ratio: float | None = None,
 ) -> CompletenessHandler:
     def validate(request: CompletenessRequest) -> Any:
+        config = request.table_config
+        require_every_signature = _config_bool(
+            config,
+            "completeness_require_all_signatures",
+            require_all_signatures,
+        )
+        allow_single_value = _config_bool(
+            config,
+            "completeness_allow_single_value_boundary_rows",
+            allow_single_value_boundary_rows,
+        )
+        track_sections = _config_bool(
+            config,
+            "completeness_track_sections",
+            track_operating_sections,
+        )
+        configured_recall_ratio = _config_float(
+            config,
+            "completeness_source_item_recall_ratio",
+            source_item_recall_ratio,
+        )
         kwargs = dict(request.validator_kwargs)
+        if config:
+            kwargs["table_config"] = config
         if (
-            source_item_recall_ratio is not None
+            configured_recall_ratio is not None
             and request.mode in {"full_table", "single_page"}
         ):
-            kwargs["source_item_recall_ratio"] = source_item_recall_ratio
+            kwargs["source_item_recall_ratio"] = configured_recall_ratio
         if request.mode == "full_table":
             kwargs["required_signature_hits"] = (
                 len(request.signatures)
-                if require_all_signatures
+                if require_every_signature
                 else min(1, len(request.signatures))
             )
             return request.validator(
@@ -697,11 +898,11 @@ def make_completeness_handler(
             )
         if request.mode == "source_profile":
             kwargs["allow_single_value_boundary_rows"] = (
-                allow_single_value_boundary_rows
+                allow_single_value
             )
             return request.validator(request.table_id, **kwargs)
         if request.mode == "source_sections":
-            kwargs["track_operating_sections"] = track_operating_sections
+            kwargs["track_operating_sections"] = track_sections
             return request.validator(request.table_id, **kwargs)
         return request.validator(
             request.table_id,
@@ -720,17 +921,31 @@ GENERIC_COMPLETENESS_HANDLER = make_completeness_handler()
 
 def _solvency_main_boundary_handler(request: BoundaryRequest) -> Any:
     sliced = GENERIC_BOUNDARY_HANDLER(request)
-    if request.mode == "grid_slice":
+    actions = _config_actions(
+        request.table_config,
+        "boundary_actions",
+        ("extend_solvency_forecast",),
+    )
+    if request.mode == "grid_slice" and "extend_solvency_forecast" in actions:
         return _extend_solvency_main_forecast_grid(
             request.grid_text,
             sliced,
+            request.table_config,
         )
     return sliced
 
 
 def _three_year_return_boundary_handler(request: BoundaryRequest) -> Any:
-    if request.mode == "grid_slice":
-        sliced = _slice_three_year_return_grid(request.grid_text)
+    actions = _config_actions(
+        request.table_config,
+        "boundary_actions",
+        ("select_three_year_percent_rows",),
+    )
+    if request.mode == "grid_slice" and "select_three_year_percent_rows" in actions:
+        sliced = _slice_three_year_return_grid(
+            request.grid_text,
+            request.table_config,
+        )
         if sliced is not None:
             return sliced
     return GENERIC_BOUNDARY_HANDLER(request)
@@ -765,15 +980,22 @@ _SOLVENCY_MAIN_BASE_COMPLETENESS_HANDLER = make_completeness_handler(
 def _solvency_main_completeness_handler(
     request: CompletenessRequest,
 ) -> Any:
+    config = request.table_config
+    recall_ratio = _config_float(
+        config,
+        "completeness_source_item_recall_ratio",
+        1.0,
+    )
     if (
         request.mode == "full_table"
         and "source_item_labels" in request.validator_kwargs
+        and recall_ratio is not None
     ):
         request = replace(
             request,
             validator_kwargs={
                 **request.validator_kwargs,
-                "source_item_recall_ratio": 1.0,
+                "source_item_recall_ratio": recall_ratio,
             },
         )
     result = _SOLVENCY_MAIN_BASE_COMPLETENESS_HANDLER(request)
@@ -781,8 +1003,20 @@ def _solvency_main_completeness_handler(
         return result
     expected_rows, required_terms = result
     grids = request.validator_kwargs.get("grids")
+    require_forecast = _config_bool(
+        config,
+        "completeness_require_forecast_if_present",
+        True,
+    )
+    if not require_forecast:
+        return result
+    forecast_markers = _config_terms(
+        config,
+        "forecast_markers",
+        _SOLVENCY_FORECAST_MARKERS,
+    )
     has_forecast = any(
-        _grid_line_has_any(line, _SOLVENCY_FORECAST_MARKERS)
+        _grid_line_has_any(line, forecast_markers)
         for grid in grids or ()
         for line in str(getattr(grid, "grid_text", "") or "").splitlines()
     )
@@ -790,7 +1024,7 @@ def _solvency_main_completeness_handler(
         return result
     return expected_rows, tuple(dict.fromkeys([
         *required_terms,
-        "预测数",
+        _config_text(config, "forecast_required_term", "预测数"),
     ]))
 
 
@@ -831,7 +1065,15 @@ _OPERATING_METRICS_BASE_BOUNDARY_HANDLER = make_boundary_handler(
 
 
 def _operating_metrics_boundary_handler(request: BoundaryRequest) -> Any:
-    if request.mode == "grid_slice":
+    actions = _config_actions(
+        request.table_config,
+        "boundary_actions",
+        ("recover_operating_metrics_sections",),
+    )
+    if (
+        request.mode == "grid_slice"
+        and "recover_operating_metrics_sections" in actions
+    ):
         sliced = _slice_operating_metrics_tail(request.grid_text)
         if sliced is None:
             sliced = _OPERATING_METRICS_BASE_BOUNDARY_HANDLER(request)

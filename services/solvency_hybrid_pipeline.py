@@ -48,6 +48,7 @@ from .solvency_ai_table_extractor import (
 from .solvency_table_boundaries import (
     TableBoundaryError,
     boundary_instruction,
+    boundary_instruction_for_table,
     boundary_items,
     enforce_output_boundaries,
     item_hits_in_rows,
@@ -286,7 +287,7 @@ def _vision_locator_messages(
             "table_id": str(item["table_id"]),
             "table_name": str(item["table_name"]),
             "max_pages": max(1, int(item.get("max_pages", 1))),
-            "boundary": boundary_instruction(str(item["table_id"])),
+            "boundary": boundary_instruction_for_table(item),
         }
         for item in tables
     ]
@@ -887,7 +888,7 @@ def locate_tables_hybrid(
     ]
     target_names = [str(item["table_name"]) for item in tables]
     boundary_hints = "\n".join(
-        f"- {item['table_name']}：{boundary_instruction(str(item['table_id']))}"
+        f"- {item['table_name']}：{boundary_instruction_for_table(item)}"
         for item in tables
     )
     scan_text = "\n\n".join(
@@ -1067,6 +1068,7 @@ def locate_tables_hybrid(
                     "radar": radar_pages,
                 },
                 strategy_id=str(table.get("strategy_id", "")),
+                table_config=dict(table),
             )
         )
     status_parts: list[str] = []
@@ -1089,18 +1091,40 @@ def locate_tables_hybrid(
     return results, "；".join(status_parts) + "。"
 
 
-def _pipe_prompt(table_id: str, table_name: str, page_number: int, retry_reason: str = "") -> str:
+def _pipe_prompt(
+    table_id: str,
+    table_name: str,
+    page_number: int,
+    retry_reason: str = "",
+    table_config: Mapping[str, object] | None = None,
+) -> str:
+    config = dict(table_config or {})
+    signatures = tuple(
+        config.get("content_terms")
+        or config.get("completeness_terms")
+        or TABLE_SIGNATURES.get(table_id, ())
+    )
+    headers = tuple(
+        config.get("header_terms") or TABLE_HEADERS.get(table_id, ())
+    )
+    configured_exclusions = tuple(dict.fromkeys([
+        *config.get("exclude_item_terms", ()),
+        *config.get("profile_exclude_items", ()),
+        *config.get("stop_terms", ()),
+    ]))
+    exclusions = configured_exclusions or TABLE_EXCLUSIONS.get(table_id, ())
     strategy = active_table_strategy(table_id)
     return strategy.build_prompt(PromptRequest(
         mode="single_page",
         table_id=table_id,
         table_name=table_name,
-        signatures=tuple(TABLE_SIGNATURES.get(table_id, ())),
-        headers=tuple(TABLE_HEADERS.get(table_id, ())),
-        exclusions=tuple(TABLE_EXCLUSIONS.get(table_id, ())),
-        boundary_text=boundary_instruction(table_id),
+        signatures=signatures,
+        headers=headers,
+        exclusions=exclusions,
+        boundary_text=boundary_instruction_for_table(config or {"table_id": table_id}),
         page_number=page_number,
         retry_reason=retry_reason,
+        table_config=config,
     ))
 
 
@@ -1110,9 +1134,16 @@ def _text_page_messages(
     page_number: int,
     grid: PageGrid,
     retry_reason: str = "",
+    table_config: Mapping[str, object] | None = None,
 ) -> list[dict]:
-    sliced = _slice_grid_for_target(table_id, grid.grid_text)
-    prompt = _pipe_prompt(table_id, table_name, page_number, retry_reason)
+    sliced = _slice_grid_for_target(
+        table_id,
+        grid.grid_text,
+        table_config,
+    )
+    prompt = _pipe_prompt(
+        table_id, table_name, page_number, retry_reason, table_config,
+    )
     prompt += (
         "\n下面每行开头的三位数字和第一个竖线是页面坐标行号，不属于表格单元格；"
         "请忽略坐标行号后再重构。\n\n" + sliced
@@ -1125,11 +1156,14 @@ def _vision_page_messages(
     table_name: str,
     page_number: int,
     image_url: str,
+    table_config: Mapping[str, object] | None = None,
 ) -> list[dict]:
     return [{
         "role": "user",
         "content": [
-            {"type": "text", "text": _pipe_prompt(table_id, table_name, page_number)},
+            {"type": "text", "text": _pipe_prompt(
+                table_id, table_name, page_number, table_config=table_config,
+            )},
             {"type": "image_url", "image_url": {"url": image_url, "detail": "high"}},
         ],
     }]
@@ -1179,8 +1213,19 @@ def _numeric_output_rows(rows: list[list[str]]) -> int:
     )
 
 
-def _trim_page_rows(table_id: str, rows: list[list[str]]) -> list[list[str]]:
-    markers = AI_TABLE_END_MARKERS.get(table_id, ())
+def _trim_page_rows(
+    table_id: str,
+    rows: list[list[str]],
+    table_config: Mapping[str, object] | None = None,
+) -> list[list[str]]:
+    config = dict(
+        table_config
+        or active_table_strategy(table_id).table_config
+        or {}
+    )
+    markers = tuple(
+        config.get("stop_terms") or AI_TABLE_END_MARKERS.get(table_id, ())
+    )
     end = len(rows)
     for index, row in enumerate(rows):
         row_text = _row_text(row)
@@ -1199,6 +1244,7 @@ def _prepare_page_rows(
     source_grids: list[PageGrid] | None = None,
 ) -> tuple[list[list[str]], str, float]:
     strategy = active_table_strategy(table_id)
+    config = dict(strategy.table_config)
     rows, ragged_ratio = _parse_pipe_rows_with_shape(content)
     rows, postprocess_notes = strategy.postprocess(PostprocessRequest(
         table_id=table_id,
@@ -1210,7 +1256,7 @@ def _prepare_page_rows(
     if any("归一化" in note for note in postprocess_notes):
         ragged_ratio = 0.0
     note = "；".join(postprocess_notes)
-    return _trim_page_rows(table_id, rows), note, ragged_ratio
+    return _trim_page_rows(table_id, rows, config), note, ragged_ratio
 
 
 def _validate_single_page_core(
@@ -1219,14 +1265,18 @@ def _validate_single_page_core(
     grid: PageGrid,
     ragged_ratio: float = 0.0,
     source_item_recall_ratio: float = SOURCE_ITEM_RECALL_RATIO,
+    table_config: Mapping[str, object] | None = None,
 ) -> tuple[float, int, int]:
-    rows = _trim_page_rows(table_id, rows)
+    config = dict(table_config or {})
+    rows = _trim_page_rows(table_id, rows, config)
     if ragged_ratio > 0.20:
         raise ExtractionQualityError(
             f"本页超过20%的输出行列数不一致（{ragged_ratio:.0%}）。"
         )
-    expected_rows, source_terms = _source_completeness_profile(table_id, [grid])
-    semantic_items = set(boundary_items(table_id))
+    expected_rows, source_terms = _source_completeness_profile(
+        table_id, [grid], config
+    )
+    semantic_items = set(boundary_items(table_id, config))
     exact_hits = set(item_hits_in_rows(rows, semantic_items))
     flat = _compact("".join(cell for row in rows for cell in row))
     missing_terms = [
@@ -1251,8 +1301,8 @@ def _validate_single_page_core(
             )
     elif len(rows) < 1:
         raise ExtractionQualityError("本页未提取到有效表格行。")
-    source_labels = _source_item_labels(table_id, [grid])
-    source_sections = _source_section_titles(table_id, [grid])
+    source_labels = _source_item_labels(table_id, [grid], config)
+    source_sections = _source_section_titles(table_id, [grid], config)
     _validate_source_section_order(rows, source_sections)
     item_recall, missing_items = _item_recall_profile(rows, source_labels)
     if len(source_labels) >= 4 and item_recall < source_item_recall_ratio:
@@ -1286,7 +1336,11 @@ def _validate_single_page(
 
 def _header_score(table_id: str, row: list[str]) -> int:
     text = _row_text(row)
-    return sum(_compact(term) in text for term in TABLE_HEADERS.get(table_id, ()))
+    config = active_table_strategy(table_id).table_config
+    headers = tuple(
+        config.get("header_terms") or TABLE_HEADERS.get(table_id, ())
+    )
+    return sum(_compact(term) in text for term in headers)
 
 
 def _is_same_header(left: list[str], right: list[str]) -> bool:
@@ -1446,6 +1500,7 @@ def _extract_one_page(
     timeout: int,
     post_func: Callable | None,
     render_func: Callable | None = None,
+    table_config: Mapping[str, object] | None = None,
 ) -> tuple[
     list[list[str]] | None,
     str,
@@ -1464,7 +1519,10 @@ def _extract_one_page(
                 api_key=api_key,
                 base_url=base_url,
                 model=model,
-                messages=_text_page_messages(table_id, table_name, page_number, grid),
+                messages=_text_page_messages(
+                    table_id, table_name, page_number, grid,
+                    table_config=table_config,
+                ),
                 timeout=timeout,
                 post_func=post_func,
             )
@@ -1505,7 +1563,7 @@ def _extract_one_page(
             base_url=base_url,
             model=model,
             messages=_vision_page_messages(
-                table_id, table_name, page_number, images[0][1]
+                table_id, table_name, page_number, images[0][1], table_config
             ),
             timeout=timeout,
             post_func=post_func,
@@ -1568,7 +1626,8 @@ def _extract_one_page(
                 base_url=base_url,
                 model=model,
                 messages=_vision_page_messages(
-                    table_id, table_name, page_number, high_res_images[0][1]
+                    table_id, table_name, page_number, high_res_images[0][1],
+                    table_config,
                 ),
                 timeout=timeout,
                 post_func=post_func,
@@ -1636,7 +1695,7 @@ def _extract_one_page(
             base_url=base_url,
             model=model,
             messages=_text_page_messages(
-                table_id, table_name, page_number, grid, reason
+                table_id, table_name, page_number, grid, reason, table_config
             ),
             timeout=timeout,
             post_func=post_func,
@@ -1859,6 +1918,7 @@ def extract_tables_hybrid(
         table_strategy = resolve_table_strategy(
             match.table_id,
             match.strategy_id or None,
+            match.table_config,
         )
         grids = cached_grids(pages)
         grid_by_page = {item.page_number: item for item in grids}
@@ -1890,6 +1950,7 @@ def extract_tables_hybrid(
                     timeout=timeout,
                     post_func=post_func,
                     render_func=cached_render_images,
+                    table_config=match.table_config,
                 ): page
                 for page in pages
             }
@@ -1942,10 +2003,19 @@ def extract_tables_hybrid(
             except TableBoundaryError as boundary_exc:
                 raise ExtractionQualityError(str(boundary_exc)) from boundary_exc
             expected_rows, source_terms = _source_completeness_profile(
-                match.table_id, grids
+                match.table_id, grids, match.table_config
             )
-            source_labels = _source_item_labels(match.table_id, grids)
-            source_sections = _source_section_titles(match.table_id, grids)
+            configured_terms = tuple(
+                match.table_config.get("completeness_terms", ())
+            )
+            if configured_terms:
+                source_terms = configured_terms
+            source_labels = _source_item_labels(
+                match.table_id, grids, match.table_config
+            )
+            source_sections = _source_section_titles(
+                match.table_id, grids, match.table_config
+            )
             quality, evidence = table_strategy.validate_completeness(
                 CompletenessRequest(
                     mode="full_table",
@@ -1953,7 +2023,8 @@ def extract_tables_hybrid(
                     rows=merged_rows,
                     ragged_ratio=0.0,
                     signatures=tuple(
-                        TABLE_SIGNATURES.get(match.table_id, ())
+                        match.table_config.get("content_terms")
+                        or TABLE_SIGNATURES.get(match.table_id, ())
                     ),
                     validator=_validate,
                     validator_kwargs={
@@ -1961,6 +2032,17 @@ def extract_tables_hybrid(
                         "source_required_terms": source_terms,
                         "source_item_labels": source_labels,
                         "source_section_titles": source_sections,
+                        "configured_required": tuple(
+                            match.table_config.get("content_terms", ())
+                        ),
+                        "configured_exclusions": tuple(dict.fromkeys([
+                            *match.table_config.get("exclude_item_terms", ()),
+                            *match.table_config.get("profile_exclude_items", ()),
+                            *match.table_config.get("stop_terms", ()),
+                        ])),
+                        "configured_minimum_rows": int(
+                            match.table_config.get("minimum_rows", 0) or 0
+                        ),
                     },
                 )
             )

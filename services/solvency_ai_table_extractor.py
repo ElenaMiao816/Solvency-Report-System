@@ -6,7 +6,7 @@ import json
 import math
 import re
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Mapping
 
 import fitz
 import pandas as pd
@@ -24,6 +24,7 @@ from .solvency_pdf_locator import PageMatch
 from .solvency_table_boundaries import (
     TableBoundaryError,
     boundary_instruction,
+    boundary_instruction_for_table,
     boundary_items,
     boundary_variants,
     end_item_groups,
@@ -595,7 +596,7 @@ def extract_unit_records(
 
 def _group_matches(
     matches: list[PageMatch],
-) -> list[tuple[str, str, list[int], str]]:
+) -> list[tuple[str, str, list[int], str, dict]]:
     grouped: dict[str, dict] = {}
     order: list[str] = []
     for match in matches:
@@ -604,6 +605,7 @@ def _group_matches(
                 "name": match.table_name,
                 "pages": [],
                 "strategy_id": match.strategy_id,
+                "table_config": dict(match.table_config),
             }
             order.append(match.table_id)
         elif (
@@ -623,6 +625,7 @@ def _group_matches(
             grouped[table_id]["name"],
             sorted(set(grouped[table_id]["pages"])),
             grouped[table_id]["strategy_id"],
+            grouped[table_id]["table_config"],
         )
         for table_id in order
     ]
@@ -675,18 +678,41 @@ def build_pdf_grids(pdf_bytes: bytes, pages: list[int]) -> list[PageGrid]:
     return result
 
 
-def _instructions(table_id: str, table_name: str, pages: list[int]) -> str:
+def _instructions(
+    table_id: str,
+    table_name: str,
+    pages: list[int],
+    table_config: Mapping[str, object] | None = None,
+) -> str:
+    config = dict(table_config or {})
+    signatures = tuple(
+        config.get("content_terms") or TABLE_SIGNATURES.get(table_id, ())
+    )
+    headers = tuple(
+        config.get("header_terms") or TABLE_HEADERS.get(table_id, ())
+    )
+    configured_exclusions = tuple(dict.fromkeys([
+        *config.get("exclude_item_terms", ()),
+        *config.get("profile_exclude_items", ()),
+        *config.get("stop_terms", ()),
+    ]))
+    exclusions = configured_exclusions or TABLE_EXCLUSIONS.get(table_id, ())
+    completeness = tuple(
+        config.get("completeness_terms")
+        or TABLE_COMPLETENESS_TERMS.get(table_id, ())
+    )
     strategy = active_table_strategy(table_id)
     return strategy.build_prompt(PromptRequest(
         mode="full_table",
         table_id=table_id,
         table_name=table_name,
-        signatures=tuple(TABLE_SIGNATURES.get(table_id, ())),
-        headers=tuple(TABLE_HEADERS.get(table_id, ())),
-        exclusions=tuple(TABLE_EXCLUSIONS.get(table_id, ())),
-        completeness_terms=tuple(TABLE_COMPLETENESS_TERMS.get(table_id, ())),
-        boundary_text=boundary_instruction(table_id),
+        signatures=signatures,
+        headers=headers,
+        exclusions=exclusions,
+        completeness_terms=completeness,
+        boundary_text=boundary_instruction_for_table(config or {"table_id": table_id}),
         pages=tuple(pages),
+        table_config=config,
     ))
 
 
@@ -697,7 +723,9 @@ def _slice_grid_for_target_core(
     operating_metrics: bool = False,
     respect_variant_activation: bool = False,
     require_value_for_boundary_items: bool = False,
+    table_config: Mapping[str, object] | None = None,
 ) -> str:
+    config = dict(table_config or {})
     lines = grid_text.splitlines()
     if not lines:
         return grid_text
@@ -726,7 +754,7 @@ def _slice_grid_for_target_core(
             flags=re.I,
         ))
 
-    variants = boundary_variants(table_id)
+    variants = boundary_variants(table_id, table_config)
     boundary = variants[0] if variants else {}
     variant_profiles: list[tuple[int, int, dict, int | None, bool]] = []
     for variant_index, candidate in enumerate(variants):
@@ -929,7 +957,10 @@ def _slice_grid_for_target_core(
                 and any(
                     any(
                         line_has_item(lines[index], title)
-                        for title in OPERATING_SECTION_TITLES
+                        for title in (
+                            config.get("section_titles")
+                            or OPERATING_SECTION_TITLES
+                        )
                     )
                     for index in range(candidate_end_hit + 1, len(lines))
                 )
@@ -944,24 +975,42 @@ def _slice_grid_for_target_core(
     else:
         if start_hit is None and title_index is None:
             for index, line in enumerate(compact_lines):
-                if any(_compact(term) in line for term in TABLE_START_MARKERS.get(table_id, ())):
+                if any(
+                    _compact(term) in line
+                    for term in (
+                        config.get("start_item_terms")
+                        or config.get("title_terms")
+                        or TABLE_START_MARKERS.get(table_id, ())
+                    )
+                ):
                     start = index
                     break
         end = len(lines)
         for index in range(start + 1, len(lines)):
-            if any(_compact(term) in compact_lines[index] for term in AI_TABLE_END_MARKERS.get(table_id, ())):
+            if any(
+                _compact(term) in compact_lines[index]
+                for term in (
+                    config.get("stop_terms")
+                    or AI_TABLE_END_MARKERS.get(table_id, ())
+                )
+            ):
                 end = index
                 break
     return "\n".join(lines[start:end])
 
 
-def _slice_grid_for_target(table_id: str, grid_text: str) -> str:
+def _slice_grid_for_target(
+    table_id: str,
+    grid_text: str,
+    table_config: Mapping[str, object] | None = None,
+) -> str:
     strategy = active_table_strategy(table_id)
     return strategy.enforce_boundaries(BoundaryRequest(
         mode="grid_slice",
         table_id=table_id,
         grid_text=grid_text,
         engine=_slice_grid_for_target_core,
+        table_config=dict(table_config or {}),
     ))
 
 
@@ -975,11 +1024,16 @@ def _source_table_lines_core(
     grids: list[PageGrid] | None,
     *,
     preserve_adjustment_after_footnote: bool = False,
+    table_config: Mapping[str, object] | None = None,
 ) -> list[str]:
     """Return target-table lines without page-local footnotes and their continuations."""
     source_lines: list[str] = []
     for grid in grids or []:
-        sliced_lines = _slice_grid_for_target(table_id, grid.grid_text).splitlines()
+        sliced_lines = _slice_grid_for_target(
+            table_id,
+            grid.grid_text,
+            table_config,
+        ).splitlines()
         index = 0
         while index < len(sliced_lines):
             line = sliced_lines[index]
@@ -1014,6 +1068,7 @@ def _source_table_lines_core(
 def _source_table_lines(
     table_id: str,
     grids: list[PageGrid] | None,
+    table_config: Mapping[str, object] | None = None,
 ) -> list[str]:
     strategy = active_table_strategy(table_id)
     return strategy.enforce_boundaries(BoundaryRequest(
@@ -1021,6 +1076,7 @@ def _source_table_lines(
         table_id=table_id,
         source_grids=grids,
         engine=_source_table_lines_core,
+        table_config=dict(table_config or {}),
     ))
 
 
@@ -1254,19 +1310,25 @@ def _source_completeness_profile_core(
     grids: list[PageGrid] | None,
     *,
     allow_single_value_boundary_rows: bool = False,
+    table_config: Mapping[str, object] | None = None,
 ) -> tuple[int, tuple[str, ...]]:
     """Estimate source rows and the boundary items visibly present in the source."""
-    source_lines = _source_table_lines(table_id, grids)
+    config = dict(table_config or {})
+    source_lines = _source_table_lines(table_id, grids, config)
 
     required_terms = [
         term
-        for term in TABLE_COMPLETENESS_TERMS.get(table_id, ())
+        for term in (
+            config.get("completeness_terms")
+            or TABLE_COMPLETENESS_TERMS.get(table_id, ())
+        )
         if any(
             line_has_item(line, term, require_value=True)
             for line in source_lines
         )
     ]
-    for item in boundary_items(table_id):
+    semantic_items = boundary_items(table_id, config)
+    for item in semantic_items:
         if any(
             line_has_item(line, item, require_value=True)
             for line in source_lines
@@ -1297,15 +1359,15 @@ def _source_completeness_profile_core(
             continue
         value_matches = _source_value_matches(table_id, content)
         if (
-            table_id == "OPERATING_METRICS"
-            and _is_operating_section_only_line(content, value_matches)
-        ):
+            bool(config.get("completeness_track_sections"))
+            or table_id == "OPERATING_METRICS"
+        ) and _is_operating_section_only_line(content, value_matches):
             continue
         if len(value_matches) >= 2:
             numeric_rows += 1
         elif allow_single_value_boundary_rows and (
             "%" in content or "％" in content
-        ) and any(line_has_item(line, item) for item in boundary_items(table_id)):
+        ) and any(line_has_item(line, item) for item in semantic_items):
             numeric_rows += 1
     return numeric_rows, tuple(dict.fromkeys(required_terms))
 
@@ -1313,6 +1375,7 @@ def _source_completeness_profile_core(
 def _source_completeness_profile(
     table_id: str,
     grids: list[PageGrid] | None,
+    table_config: Mapping[str, object] | None = None,
 ) -> tuple[int, tuple[str, ...]]:
     strategy = active_table_strategy(table_id)
     return strategy.validate_completeness(CompletenessRequest(
@@ -1321,6 +1384,7 @@ def _source_completeness_profile(
         rows=[],
         validator=_source_completeness_profile_core,
         validator_kwargs={"grids": grids},
+        table_config=dict(table_config or {}),
     ))
 
 
@@ -1334,6 +1398,7 @@ def _normalized_item_label(value: str) -> str:
 def _source_item_labels(
     table_id: str,
     grids: list[PageGrid] | None,
+    table_config: Mapping[str, object] | None = None,
 ) -> tuple[str, ...]:
     """Recover row-label fingerprints from the source PDF grid.
 
@@ -1343,15 +1408,19 @@ def _source_item_labels(
     """
     labels: list[str] = []
     number_pattern = _SOURCE_CELL_VALUE_RE
+    config = dict(table_config or {})
     header_terms = {
         _compact(term)
-        for term in TABLE_HEADERS.get(table_id, ())
+        for term in (
+            config.get("header_terms")
+            or TABLE_HEADERS.get(table_id, ())
+        )
     }
     metadata_terms = tuple(map(
         _compact,
         ("公司名称", "报告期", "报表日期", "编制日期", "单位", "币种"),
     ))
-    source_lines = _source_table_lines(table_id, grids)
+    source_lines = _source_table_lines(table_id, grids, config)
     numbered_row_re = re.compile(
         r"^\s*(?:[（(]?[一二三四五六七八九十]+[）)]|"
         r"\d+(?:\.\d+)*\.?)"
@@ -1368,7 +1437,10 @@ def _source_item_labels(
         if len(number_matches) < 2:
             continue
         if (
-            table_id == "OPERATING_METRICS"
+            (
+                bool(config.get("completeness_track_sections"))
+                or table_id == "OPERATING_METRICS"
+            )
             and _is_operating_section_only_line(content, number_matches)
         ):
             continue
@@ -1438,13 +1510,18 @@ def _source_section_titles_core(
     grids: list[PageGrid] | None,
     *,
     track_operating_sections: bool = False,
+    table_config: Mapping[str, object] | None = None,
 ) -> tuple[str, ...]:
     if not track_operating_sections:
         return ()
     ordered: list[str] = []
-    for line in _source_table_lines(table_id, grids):
+    config = dict(table_config or {})
+    section_titles = tuple(
+        config.get("section_titles") or OPERATING_SECTION_TITLES
+    )
+    for line in _source_table_lines(table_id, grids, config):
         compact_line = _compact(line.partition("|")[2])
-        for title in OPERATING_SECTION_TITLES:
+        for title in section_titles:
             if _compact(title) in compact_line and title not in ordered:
                 ordered.append(title)
     return tuple(ordered)
@@ -1453,6 +1530,7 @@ def _source_section_titles_core(
 def _source_section_titles(
     table_id: str,
     grids: list[PageGrid] | None,
+    table_config: Mapping[str, object] | None = None,
 ) -> tuple[str, ...]:
     strategy = active_table_strategy(table_id)
     return strategy.validate_completeness(CompletenessRequest(
@@ -1461,6 +1539,7 @@ def _source_section_titles(
         rows=[],
         validator=_source_section_titles_core,
         validator_kwargs={"grids": grids},
+        table_config=dict(table_config or {}),
     ))
 
 
@@ -1525,8 +1604,16 @@ def _item_recall_profile(
     return recall, tuple(missing)
 
 
-def _trim_adjacent_rows(table_id: str, rows: list[list[str]]) -> tuple[list[list[str]], str]:
-    markers = AI_TABLE_END_MARKERS.get(table_id, ())
+def _trim_adjacent_rows(
+    table_id: str,
+    rows: list[list[str]],
+    table_config: Mapping[str, object] | None = None,
+) -> tuple[list[list[str]], str]:
+    config = dict(table_config or {})
+    markers = tuple(
+        config.get("stop_terms")
+        or AI_TABLE_END_MARKERS.get(table_id, ())
+    )
     if len(rows) < 2 or not markers:
         return rows, ""
     for index, row in enumerate(rows[1:], start=1):
@@ -1539,14 +1626,26 @@ def _trim_adjacent_rows(table_id: str, rows: list[list[str]]) -> tuple[list[list
             return trimmed, f"已在相邻表边界“{hit}”前自动截断"
     return rows, ""
 
-def _grid_messages(table_id: str, table_name: str, pages: list[int], grids: list[PageGrid]) -> list[dict]:
+def _grid_messages(
+    table_id: str,
+    table_name: str,
+    pages: list[int],
+    grids: list[PageGrid],
+    table_config: Mapping[str, object] | None = None,
+) -> list[dict]:
     blocks = "\n\n".join(
-        f"===== PDF物理第 {item.page_number} 页 =====\n{_slice_grid_for_target(table_id, item.grid_text)}"
+        f"===== PDF物理第 {item.page_number} 页 =====\n"
+        f"{_slice_grid_for_target(table_id, item.grid_text, table_config)}"
         for item in grids
     )
+    config = dict(table_config or {})
+    prompt_role = str(
+        config.get("prompt_role")
+        or "保险公司偿付能力报告表格重构专家"
+    )
     return [
-        {"role": "system", "content": "你是保险公司偿付能力报告表格重构专家。必须依据页面网格恢复表格，不能编造披露数据。"},
-        {"role": "user", "content": f"{_instructions(table_id, table_name, pages)}\n\n{blocks}"},
+        {"role": "system", "content": f"你是{prompt_role}。必须依据页面网格恢复表格，不能编造披露数据。"},
+        {"role": "user", "content": f"{_instructions(table_id, table_name, pages, table_config)}\n\n{blocks}"},
     ]
 
 
@@ -1556,8 +1655,9 @@ def _grid_repair_messages(
     pages: list[int],
     grids: list[PageGrid],
     previous_error: str,
+    table_config: Mapping[str, object] | None = None,
 ) -> list[dict]:
-    messages = _grid_messages(table_id, table_name, pages, grids)
+    messages = _grid_messages(table_id, table_name, pages, grids, table_config)
     messages[-1]["content"] += f"""
 
 上一轮重构未通过本地质量检查，失败原因：{previous_error}
@@ -1620,10 +1720,16 @@ def _render_images(
     return result
 
 
-def _vision_messages(table_id: str, table_name: str, pages: list[int], images: list[tuple[int, str]]) -> list[dict]:
+def _vision_messages(
+    table_id: str,
+    table_name: str,
+    pages: list[int],
+    images: list[tuple[int, str]],
+    table_config: Mapping[str, object] | None = None,
+) -> list[dict]:
     content: list[dict] = [{
         "type": "text",
-        "text": _instructions(table_id, table_name, pages) + "\n以下图片按物理页码顺序排列，请直接读取图片网格。",
+        "text": _instructions(table_id, table_name, pages, table_config) + "\n以下图片按物理页码顺序排列，请直接读取图片网格。",
     }]
     for page_number, data_url in images:
         content.extend([
@@ -1811,13 +1917,22 @@ def _validate(
     source_section_titles: tuple[str, ...] = (),
     required_signature_hits: int | None = None,
     source_item_recall_ratio: float = SOURCE_ITEM_RECALL_RATIO,
+    configured_required: tuple[str, ...] = (),
+    configured_exclusions: tuple[str, ...] = (),
+    configured_minimum_rows: int = 0,
+    table_config: Mapping[str, object] | None = None,
 ) -> tuple[float, str]:
+    config = dict(table_config or {})
     if len(rows) < 2 or len(rows[0]) < 2:
         raise ExtractionQualityError("重构结果少于2行或2列。")
     if ragged_ratio > 0.2:
         raise ExtractionQualityError(f"超过20%的数据行列数与表头不一致（{ragged_ratio:.0%}）。")
     flat = _compact("".join(cell for row in rows for cell in row))
-    required = TABLE_SIGNATURES.get(table_id, ())
+    required = (
+        configured_required
+        or tuple(config.get("content_terms", ()))
+        or TABLE_SIGNATURES.get(table_id, ())
+    )
     required_hits = [term for term in required if _compact(term) in flat]
     minimum = (
         required_signature_hits
@@ -1830,12 +1945,21 @@ def _validate(
     )
     if required and len(required_hits) < minimum:
         raise ExtractionQualityError(f"缺少目标表核心内容：{'、'.join(required)}。")
-    exclusion_hits = [term for term in TABLE_EXCLUSIONS.get(table_id, ()) if _compact(term) in flat]
+    exclusions = (
+        tuple(configured_exclusions)
+        or tuple(config.get("stop_terms", ()))
+        or TABLE_EXCLUSIONS.get(table_id, ())
+    )
+    exclusion_hits = [term for term in exclusions if _compact(term) in flat]
     if exclusion_hits:
         raise ExtractionQualityError(f"疑似混入相邻表内容：{'、'.join(exclusion_hits)}。")
 
-    completeness_terms = source_required_terms or TABLE_COMPLETENESS_TERMS.get(table_id, ())
-    semantic_items = set(boundary_items(table_id))
+    completeness_terms = (
+        source_required_terms
+        or tuple(config.get("completeness_terms", ()))
+        or TABLE_COMPLETENESS_TERMS.get(table_id, ())
+    )
+    semantic_items = set(boundary_items(table_id, config))
     exact_hits = set(item_hits_in_rows(rows, semantic_items))
     missing_completeness = [
         term for term in completeness_terms
@@ -1864,7 +1988,14 @@ def _validate(
         numeric_rows += bool(has_number)
         if not row_number_table:
             shifted_rows += bool(re.search(r"\d", row[0]) and not has_number)
-    configured_minimum = int(TABLE_MIN_NUMERIC_ROWS.get(table_id, 1))
+    configured_minimum = (
+        int(config.get("minimum_rows", 0) or 0)
+        if "minimum_rows" in config
+        else max(
+            int(TABLE_MIN_NUMERIC_ROWS.get(table_id, 1)),
+            int(configured_minimum_rows or 0),
+        )
+    )
     minimum_numeric_rows = (
         min(configured_minimum, expected_source_rows)
         if expected_source_rows > 0
@@ -1897,7 +2028,14 @@ def _validate(
     if shifted_rows >= 2 and shifted_rows / len(data_rows) > 0.35:
         raise ExtractionQualityError("数值集中在首列，疑似网格列错位。")
 
-    header_hits = [term for term in TABLE_HEADERS.get(table_id, ()) if _compact(term) in flat]
+    header_hits = [
+        term
+        for term in (
+            config.get("header_terms")
+            or TABLE_HEADERS.get(table_id, ())
+        )
+        if _compact(term) in flat
+    ]
     score = min(99.0, 65 + len(required_hits) * 8 + len(header_hits) * 3 + min(numeric_rows, 15) * 0.6)
     evidence_parts = [*required_hits, *header_hits]
     if source_item_labels:
@@ -1913,7 +2051,9 @@ def _reconstruct(
     messages: list[dict], api_key: str, base_url: str, model: str,
     timeout: int, post_func: Callable | None,
     source_grids: list[PageGrid] | None = None,
+    table_config: Mapping[str, object] | None = None,
 ) -> ExtractedTable:
+    config = dict(table_config or {})
     strategy = active_table_strategy(table_id)
     payload = _parse_json(_call_model(
         api_key=api_key, base_url=base_url, model=model, messages=messages,
@@ -1926,7 +2066,12 @@ def _reconstruct(
         source_grids=source_grids,
         normalize_three_year=normalize_three_year_return_rows_core,
         recover_minimum_capital=recover_minimum_capital_terminal_rows_core,
-        trim_adjacent=_trim_adjacent_rows,
+        trim_adjacent=lambda target_id, target_rows: _trim_adjacent_rows(
+            target_id,
+            target_rows,
+            config,
+        ),
+        table_config=config,
     ))
     if any("归一化" in note for note in postprocess_notes):
         ragged_ratio = 0.0
@@ -1937,6 +2082,7 @@ def _reconstruct(
             rows=rows,
             require_complete=True,
             engine=enforce_output_boundaries,
+            table_config=config,
         ))
     except TableBoundaryError as exc:
         raise ExtractionQualityError(str(exc)) from exc
@@ -1949,23 +2095,37 @@ def _reconstruct(
         if item
     )
     expected_source_rows, source_required_terms = _source_completeness_profile(
-        table_id, source_grids
+        table_id, source_grids, config
     )
-    source_item_labels = _source_item_labels(table_id, source_grids)
-    source_section_titles = _source_section_titles(table_id, source_grids)
+    configured_completeness = tuple(config.get("completeness_terms", ()))
+    if configured_completeness:
+        source_required_terms = configured_completeness
+    source_item_labels = _source_item_labels(table_id, source_grids, config)
+    source_section_titles = _source_section_titles(table_id, source_grids, config)
     score, evidence = strategy.validate_completeness(CompletenessRequest(
         mode="full_table",
         table_id=table_id,
         rows=rows,
         ragged_ratio=ragged_ratio,
-        signatures=tuple(TABLE_SIGNATURES.get(table_id, ())),
+        signatures=tuple(
+            config.get("content_terms")
+            or TABLE_SIGNATURES.get(table_id, ())
+        ),
         validator=_validate,
         validator_kwargs={
             "expected_source_rows": expected_source_rows,
             "source_required_terms": source_required_terms,
             "source_item_labels": source_item_labels,
             "source_section_titles": source_section_titles,
+            "configured_required": tuple(config.get("content_terms", ())),
+            "configured_exclusions": tuple(dict.fromkeys([
+                *config.get("exclude_item_terms", ()),
+                *config.get("profile_exclude_items", ()),
+                *config.get("stop_terms", ()),
+            ])),
+            "configured_minimum_rows": int(config.get("minimum_rows", 0) or 0),
         },
+        table_config=config,
     ))
     if boundary_note:
         evidence = f"{evidence}；{boundary_note}"
@@ -2020,8 +2180,12 @@ def extract_tables_with_llm(
         if progress_callback:
             progress_callback(log)
 
-    for table_id, table_name, pages, strategy_id in _group_matches(matches):
-        table_strategy = resolve_table_strategy(table_id, strategy_id or None)
+    for table_id, table_name, pages, strategy_id, table_config in _group_matches(matches):
+        table_strategy = resolve_table_strategy(
+            table_id,
+            strategy_id or None,
+            table_config,
+        )
         grids: list[PageGrid] = []
         text_error = ""
         if not force_vision:
@@ -2035,8 +2199,11 @@ def extract_tables_with_llm(
                     table_name=table_name,
                     pages=pages,
                     mode=TEXT_MODE,
-                    messages=_grid_messages(table_id, table_name, pages, grids),
+                    messages=_grid_messages(
+                        table_id, table_name, pages, grids, table_config,
+                    ),
                     source_grids=grids,
+                    table_config=table_config,
                     api_key=api_key, base_url=base_url, model=model,
                     timeout=timeout, post_func=post_func,
                 )
@@ -2064,8 +2231,11 @@ def extract_tables_with_llm(
                 table_name=table_name,
                 pages=pages,
                 mode=VISION_MODE,
-                messages=_vision_messages(table_id, table_name, pages, images),
+                messages=_vision_messages(
+                    table_id, table_name, pages, images, table_config,
+                ),
                 source_grids=grids,
+                table_config=table_config,
                 api_key=api_key, base_url=base_url, model=model,
                 timeout=timeout, post_func=post_func,
             )
@@ -2130,9 +2300,11 @@ def extract_tables_with_llm(
                         pages=pages,
                         mode=VISION_HIGH_RES_MODE,
                         messages=_vision_messages(
-                            table_id, table_name, pages, high_res_images
+                            table_id, table_name, pages, high_res_images,
+                            table_config,
                         ),
                         source_grids=grids,
+                        table_config=table_config,
                         api_key=api_key,
                         base_url=base_url,
                         model=model,
@@ -2184,9 +2356,11 @@ def extract_tables_with_llm(
                     pages=pages,
                     mode=TEXT_RETRY_MODE,
                     messages=_grid_repair_messages(
-                        table_id, table_name, pages, grids, repair_reason
+                        table_id, table_name, pages, grids, repair_reason,
+                        table_config,
                     ),
                     source_grids=grids,
+                    table_config=table_config,
                     api_key=api_key, base_url=base_url, model=model,
                     timeout=timeout, post_func=post_func,
                 )

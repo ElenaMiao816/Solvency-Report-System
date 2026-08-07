@@ -1,15 +1,12 @@
 {
+  "workbook_schema_version": "2.0",
   "profile_id": "LIFE_SOLVENCY",
   "profile_name": "寿险偿付能力季度报告",
   "sector": "LIFE",
   "report_family": "SOLVENCY",
   "frequency": "QUARTERLY",
-  "company_types": [
-    "寿险",
-    "健康险",
-    "养老险"
-  ],
-  "config_version": "1.0",
+  "company_types": ["寿险", "健康险", "养老险"],
+  "config_version": "2.0",
   "monitoring": {
     "company_source_file": "config/solvency_company_urls.xlsx",
     "company_source_sheet": "公司网址",
@@ -17,10 +14,7 @@
     "company_name_column": "公司",
     "company_type_column": "公司类别",
     "report_url_column": "偿付能力披露地址",
-    "report_terms": [
-      "偿付能力",
-      "solvency"
-    ]
+    "report_terms": ["偿付能力", "solvency"]
   },
   "locator": {
     "feature_config_file": "config/solvency_page_features.json",
@@ -45,5 +39,27 @@
     "cross_company": true,
     "cross_period": true,
     "cross_profile": false
-  }
+  },
+  "layout_variants": [
+    {"profile_id":"LIFE_SOLVENCY","table_id":"SOLVENCY_MAIN","variant_id":"MAIN_STANDARD","variant_name":"偿付能力主表标准版","priority":100,"activation_terms":"偿付能力充足率指标|主要偿付能力指标","start_items":"认可资产|认可资产合计","end_items":"综合偿付能力充足率|综合偿付充足率","required_items":"实际资本|最低资本|核心偿付能力充足率|综合偿付能力充足率","exclude_items":"","end_item_groups":"","required_item_groups":"","scope_name":"偿付能力充足率指标","variant_note":"如原文另列下季度预测表，仍属于同一目标。","exact_items_only":false,"enabled":true,"notes":"寿险主表及预测子表。"},
+    {"profile_id":"LIFE_SOLVENCY","table_id":"OPERATING_METRICS","variant_id":"OPERATING_DISCLOSED_SCOPE","variant_name":"按实际披露范围结束","priority":100,"activation_terms":"主要经营指标|主要经营情况","start_items":"保险业务收入|保险业务收入合计","end_items":"营销员脱落率|个人营销员脱落率|代理人脱落率|营销员流失率","required_items":"保险业务收入","exclude_items":"前五大产品的信息|报告期内签单保费占前五位的产品|签单保费占前五位的产品","end_item_groups":"营销员脱落率|个人营销员脱落率|代理人脱落率|营销员流失率;综合投资收益率","required_item_groups":"","scope_name":"主要经营指标","variant_note":"若未披露效益类、规模类、品质类指标，可在综合投资收益率结束；一旦披露后三类指标，必须继续至营销员脱落率或同义项。","exact_items_only":false,"enabled":true,"notes":"排除前五大产品明细页。"},
+    {"profile_id":"LIFE_SOLVENCY","table_id":"ACTUAL_CAPITAL","variant_id":"ACTUAL_FINANCIAL_SUMMARY","variant_name":"财务报表口径汇总在前并展开实际资本明细","priority":100,"activation_terms":"实际资本汇总|财务报表资产总额","start_items":"财务报表资产总额|财务报表资产合计","end_items":"实际资本合计|实际资本总额","required_items":"认可资产|财务报表负债总额|认可负债|财务报表净资产总额|实际资本|核心一级资本|核心二级资本|附属一级资本|附属二级资本","exclude_items":"认可资产表|认可负债表","end_item_groups":"","required_item_groups":"","scope_name":"实际资本","variant_note":"汇总表和核心资本明细属于同一目标；核心一级资本调整表存在时继续提取，认可资产和认可负债明细表不属于目标。","exact_items_only":false,"enabled":true,"notes":"财务报表口径汇总版。"},
+    {"profile_id":"LIFE_SOLVENCY","table_id":"ACTUAL_CAPITAL","variant_id":"ACTUAL_RECOGNIZED_SUMMARY","variant_name":"实际资本汇总在前并展开核心资本明细","priority":90,"activation_terms":"实际资本汇总|认可资产","start_items":"认可资产|认可资产合计","end_items":"实际资本合计|实际资本总额","required_items":"认可负债|实际资本|核心一级资本|核心二级资本|附属一级资本|附属二级资本","exclude_items":"认可资产表|认可负债表","end_item_groups":"","required_item_groups":"","scope_name":"实际资本","variant_note":"汇总表和核心资本明细属于同一目标；核心一级资本调整表存在时继续提取，认可资产和认可负债明细表不属于目标。","exact_items_only":false,"enabled":true,"notes":"认可资产口径汇总版。"},
+    {"profile_id":"LIFE_SOLVENCY","table_id":"ACTUAL_CAPITAL","variant_id":"ACTUAL_RECOGNIZED_ADJUSTMENT","variant_name":"认可资产汇总后接核心一级资本调整表","priority":80,"activation_terms":"核心一级资本调整表|核心资本调整表","start_items":"认可资产|认可资产合计","end_items":"银保监会规定的其他调整项目|金融监管总局规定的其他调整项目|监管机构规定的其他调整项目","required_items":"认可负债|实际资本|核心一级资本|核心二级资本|附属一级资本|附属二级资本|净资产|对净资产的调整额","exclude_items":"认可资产表|认可负债表","end_item_groups":"","required_item_groups":"","scope_name":"实际资本","variant_note":"核心一级资本调整表存在时连续提取至最后调整项目。","exact_items_only":false,"enabled":true,"notes":"认可资产汇总加调整表。"},
+    {"profile_id":"LIFE_SOLVENCY","table_id":"ACTUAL_CAPITAL","variant_id":"ACTUAL_DIRECT_ADJUSTMENT","variant_name":"实际资本表后接核心一级资本调整表","priority":70,"activation_terms":"核心一级资本调整表|核心资本调整表","start_items":"实际资本","end_items":"银保监会规定的其他调整项目|金融监管总局规定的其他调整项目|监管机构规定的其他调整项目","required_items":"核心一级资本|核心二级资本|附属一级资本|附属二级资本|净资产|对净资产的调整额","exclude_items":"认可资产表|认可负债表","end_item_groups":"","required_item_groups":"","scope_name":"实际资本","variant_note":"核心一级资本调整表存在时连续提取至最后调整项目。","exact_items_only":false,"enabled":true,"notes":"实际资本表加调整表。"},
+    {"profile_id":"LIFE_SOLVENCY","table_id":"ACTUAL_CAPITAL","variant_id":"ACTUAL_CORE_STANDARD","variant_name":"核心资本明细标准版","priority":60,"activation_terms":"核心一级资本","start_items":"核心一级资本|核心一级资本合计","end_items":"实际资本合计|实际资本总额|实际资本|合计","required_items":"","exclude_items":"认可资产表|认可负债表","end_item_groups":"","required_item_groups":"","scope_name":"实际资本","variant_note":"原文直接从核心一级资本开始时，不要求补造汇总行。","exact_items_only":false,"enabled":true,"notes":"直接披露核心资本明细。"},
+    {"profile_id":"LIFE_SOLVENCY","table_id":"THREE_YEAR_INVESTMENT_RETURN","variant_id":"RETURN_EXPLICIT","variant_name":"明确近三年双项披露","priority":100,"activation_terms":"近三年平均投资收益率|近三年平均综合投资收益率","start_items":"近三年平均投资收益率|近三年投资收益率","end_items":"近三年平均综合投资收益率|近三年综合投资收益率","required_items":"","exclude_items":"本季度投资收益率|本季度综合投资收益率","end_item_groups":"","required_item_groups":"近三年平均投资收益率|近三年投资收益率|投资收益率;近三年平均综合投资收益率|近三年综合投资收益率|综合投资收益率","scope_name":"近三年（综合）投资收益率","variant_note":"两项收益率可能为表格或独立句式，也可能跨相邻页披露。","exact_items_only":true,"enabled":true,"notes":"明确带近三年或平均修饰语。"},
+    {"profile_id":"LIFE_SOLVENCY","table_id":"THREE_YEAR_INVESTMENT_RETURN","variant_id":"RETURN_SHORT_TITLE","variant_name":"近三年标题下简称披露","priority":10,"activation_terms":"近三年（综合）投资收益率|近三年综合投资收益率","start_items":"投资收益率","end_items":"综合投资收益率","required_items":"","exclude_items":"本季度投资收益率|本季度综合投资收益率","end_item_groups":"","required_item_groups":"近三年平均投资收益率|近三年投资收益率|投资收益率;近三年平均综合投资收益率|近三年综合投资收益率|综合投资收益率","scope_name":"近三年（综合）投资收益率","variant_note":"只有处于近三年标题范围内时，简称才可作为目标边界。","exact_items_only":true,"enabled":true,"notes":"标题下简称版。"},
+    {"profile_id":"LIFE_SOLVENCY","table_id":"MINIMUM_CAPITAL","variant_id":"MINIMUM_CAPITALIZED_FIRST","variant_name":"可资本化风险在前的完整汇总","priority":100,"activation_terms":"可资本化风险最低资本","start_items":"可资本化风险最低资本","end_items":"最低资本|最低资本合计|最低资本总额|合计","required_items":"市场风险最低资本|信用风险最低资本|保险风险最低资本","exclude_items":"风险综合评级","end_item_groups":"","required_item_groups":"","scope_name":"最低资本","variant_note":"主表后连续披露的保险、市场、信用风险最低资本汇总均属于同一目标。","exact_items_only":false,"enabled":true,"notes":"可资本化风险起始版。"},
+    {"profile_id":"LIFE_SOLVENCY","table_id":"MINIMUM_CAPITAL","variant_id":"MINIMUM_FIRST_EXPANDED","variant_name":"最低资本在前并展开风险汇总","priority":90,"activation_terms":"最低资本|保险风险最低资本汇总|市场风险最低资本汇总|信用风险最低资本汇总","start_items":"最低资本|最低资本合计|最低资本总额","end_items":"信用风险间的相关性效应|信用风险分散效应","required_items":"保险风险最低资本|市场风险最低资本|信用风险最低资本","exclude_items":"风险综合评级","end_item_groups":"信用风险间的相关性效应|信用风险分散效应;市场风险间的相关性效应|市场风险分散效应;非寿险业务保险风险间的相关性效应|寿险业务保险风险间的相关性效应;附加资本","required_item_groups":"","scope_name":"最低资本","variant_note":"风险汇总子表属于同一目标，不得在首行最低资本或附加资本处提前结束。","exact_items_only":false,"enabled":true,"notes":"最低资本首行并展开风险汇总。"},
+    {"profile_id":"LIFE_SOLVENCY","table_id":"MINIMUM_CAPITAL","variant_id":"MINIMUM_QUANTIFIED_FIRST","variant_name":"量化风险在前的标准汇总","priority":80,"activation_terms":"量化风险最低资本","start_items":"量化风险最低资本|量化风险最低资本合计","end_items":"最低资本|最低资本合计|最低资本总额|合计","required_items":"市场风险最低资本|信用风险最低资本|保险风险最低资本|附加资本","exclude_items":"风险综合评级","end_item_groups":"","required_item_groups":"","scope_name":"最低资本","variant_note":"附加资本后可能继续出现子项，必须闭合至最低资本或合计。","exact_items_only":false,"enabled":true,"notes":"量化风险起始版。"}
+  ],
+  "completeness_rules": [
+    {"profile_id":"LIFE_SOLVENCY","table_id":"SOLVENCY_MAIN","rule_id":"MAIN_REQUIRED","rule_type":"required_terms","terms":"实际资本|最低资本|核心偿付能力充足率|综合偿付能力充足率","minimum_count":4,"severity":"error","enabled":true,"notes":"主表四项核心指标必须保留。"},
+    {"profile_id":"LIFE_SOLVENCY","table_id":"OPERATING_METRICS","rule_id":"OPERATING_MIN_ROWS","rule_type":"minimum_rows","terms":"","minimum_count":1,"severity":"warning","enabled":true,"notes":"披露范围因公司而异，主要依赖原文项目召回与类别完整性。"},
+    {"profile_id":"LIFE_SOLVENCY","table_id":"ACTUAL_CAPITAL","rule_id":"ACTUAL_REQUIRED","rule_type":"required_terms","terms":"实际资本合计","minimum_count":1,"severity":"error","enabled":true,"notes":"须闭合至实际资本合计或其同义终点。"},
+    {"profile_id":"LIFE_SOLVENCY","table_id":"THREE_YEAR_INVESTMENT_RETURN","rule_id":"RETURN_REQUIRED","rule_type":"required_terms","terms":"近三年平均投资收益率|近三年平均综合投资收益率","minimum_count":2,"severity":"error","enabled":true,"notes":"两项近三年平均收益率均需保留。"},
+    {"profile_id":"LIFE_SOLVENCY","table_id":"MINIMUM_CAPITAL","rule_id":"MINIMUM_MIN_ROWS","rule_type":"minimum_rows","terms":"","minimum_count":1,"severity":"warning","enabled":true,"notes":"详细完整性由边界闭合和原文项目召回控制。"}
+  ],
+  "gold_samples": []
 }
