@@ -29,6 +29,12 @@ from services.solvency_hybrid_pipeline import (
     extract_tables_hybrid,
     locate_tables_hybrid,
 )
+from services.solvency_dataset_adapter import (
+    append_derived_metrics,
+    convert_external_workbook,
+    read_standard_workbook,
+)
+from services.solvency_metric_registry import DERIVED_METRICS, extend_taxonomy
 from services.solvency_gold_standard import (
     evaluate_gold_case,
     find_gold_case,
@@ -39,6 +45,7 @@ from services.solvency_normalizer import (
     load_taxonomy,
     normalize_tables,
     standardize_uploaded_frame,
+    upgrade_standard_frame,
 )
 from services.solvency_pdf_locator import (
     PageMatch,
@@ -54,6 +61,7 @@ ROOT = Path(__file__).resolve().parent
 CONFIG_DIR = ROOT / "config"
 PROFILE_DIR = CONFIG_DIR / "report_profiles"
 DEFAULT_PROFILE_ID = "LIFE_SOLVENCY"
+STANDARD_SCHEMA_VERSION = 2
 GOLD_MANIFEST = ROOT / "gold_standard" / "manifest.json"
 
 
@@ -61,7 +69,9 @@ st.set_page_config(page_title="偿付能力报告平台", page_icon="🛡️", l
 st.markdown(
     """
     <style>
-    .block-container {padding-top: 1.2rem; padding-bottom: 2rem;}
+    /* 保留 Streamlit 为固定顶栏提供的原生顶部安全间距；不要在这里缩小
+       padding-top，否则首个 Profile 操作区会被 Deploy/菜单工具栏覆盖。 */
+    [data-testid="stMainBlockContainer"] {padding-bottom: 2rem;}
     h1, h2, h3 {color:#00338D;}
     [data-testid="stMetric"] {background:#F4F7FC; border-left:4px solid #00338D; padding:12px; border-radius:5px;}
     </style>
@@ -89,6 +99,13 @@ def initialize_state() -> None:
         "force_vision_mode": False,
         "standard_data": pd.DataFrame(columns=STANDARD_COLUMNS),
         "integrated_data": pd.DataFrame(columns=STANDARD_COLUMNS),
+        "integration_preview": pd.DataFrame(columns=STANDARD_COLUMNS),
+        "integration_sheet_summary": pd.DataFrame(),
+        "integration_mapping_summary": pd.DataFrame(),
+        "integration_logic_checks": pd.DataFrame(),
+        "integration_warnings": [],
+        "integration_preview_mode": "",
+        "standard_schema_version": 0,
         "validation_results": pd.DataFrame(),
         "monitor_results": pd.DataFrame(),
         "monitor_single_result": None,
@@ -105,6 +122,50 @@ def initialize_state() -> None:
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+    if st.session_state.standard_schema_version < STANDARD_SCHEMA_VERSION:
+        for key in ("standard_data", "integrated_data", "integration_preview"):
+            st.session_state[key] = upgrade_standard_frame(st.session_state.get(key))
+        st.session_state.standard_schema_version = STANDARD_SCHEMA_VERSION
+
+
+def reset_profile_results() -> None:
+    """Clear report-specific state when the user switches Profile."""
+    empty_values = {
+        "pdf_bytes": None,
+        "pdf_name": "",
+        "metadata": {},
+        "page_matches": [],
+        "auto_page_matches": [],
+        "raw_tables": [],
+        "table_candidates": {},
+        "selected_table_candidates": {},
+        "ai_extraction_logs": [],
+        "ai_workbook_bytes": b"",
+        "standard_data": pd.DataFrame(columns=STANDARD_COLUMNS),
+        "integrated_data": pd.DataFrame(columns=STANDARD_COLUMNS),
+        "integration_preview": pd.DataFrame(columns=STANDARD_COLUMNS),
+        "integration_sheet_summary": pd.DataFrame(),
+        "integration_mapping_summary": pd.DataFrame(),
+        "integration_logic_checks": pd.DataFrame(),
+        "integration_warnings": [],
+        "integration_preview_mode": "",
+        "validation_results": pd.DataFrame(),
+        "monitor_results": pd.DataFrame(),
+        "monitor_single_result": None,
+        "edited_pages": {},
+        "pages_confirmed": False,
+        "normalization_diagnostics": pd.DataFrame(),
+        "locator_config_version": "",
+        "extraction_grid_cache": {},
+        "extraction_image_cache": {},
+        "active_profile_runtime": "",
+    }
+    for key, value in empty_values.items():
+        st.session_state[key] = value
+    st.session_state.pop("solvency_target_tables", None)
+    for key in list(st.session_state):
+        if str(key).startswith("page_edit_"):
+            del st.session_state[key]
 
 
 @st.cache_data(show_spinner=False)
@@ -170,6 +231,23 @@ def read_companies(
     for column in ("公司", "公司类别", "报告披露地址"):
         companies[column] = companies[column].fillna("").astype(str).str.strip()
     return companies[companies["公司"] != ""].drop_duplicates(subset=["公司"], keep="last").reset_index(drop=True)
+
+
+def prepare_embedded_companies(profile: ReportProfile) -> pd.DataFrame:
+    companies = profile.company_frame()
+    if companies.empty:
+        return companies
+    columns = {
+        str(profile.monitoring["company_name_column"]): "公司",
+        str(profile.monitoring["company_type_column"]): "公司类别",
+        str(profile.monitoring["report_url_column"]): "报告披露地址",
+    }
+    companies = companies.rename(columns=columns)
+    for column in ("公司", "公司类别", "报告披露地址"):
+        companies[column] = companies[column].fillna("").astype(str).str.strip()
+    return companies[companies["公司"] != ""].drop_duplicates(
+        subset=["公司"], keep="last",
+    ).reset_index(drop=True)
 
 
 def target_period_terms(
@@ -361,7 +439,7 @@ initialize_state()
 
 profiles = read_profile_registry()
 uploaded_profile_file = None
-with st.expander("报告 profile 配置", expanded=False):
+with st.expander("上传报告 profile 配置（高级）", expanded=False):
     st.caption(
         "目标表和定位关键词可以通过配置工作簿维护。上传后先进行结构与引用校验，"
         "仅在当前浏览器会话中生效，不会覆盖项目内的正式配置。"
@@ -386,16 +464,26 @@ with st.expander("报告 profile 配置", expanded=False):
         except ProfileValidationError as exc:
             st.error(f"配置工作簿未启用：{exc}")
 
-    profile_ids = list(profiles)
-    if st.session_state.active_profile_id not in profile_ids:
-        st.session_state.active_profile_id = profile_ids[0]
-    st.selectbox(
+profile_ids = list(profiles)
+if st.session_state.active_profile_id not in profile_ids:
+    st.session_state.active_profile_id = profile_ids[0]
+
+with st.container(border=True):
+    st.markdown("#### 切换报告类型")
+    st.segmented_control(
         "当前报告类型",
         profile_ids,
-        format_func=lambda profile_id: (
-            f"{profiles[profile_id].profile_name}（{profile_id}）"
-        ),
+        format_func=lambda profile_id: profiles[profile_id].profile_name,
+        selection_mode="single",
+        required=True,
         key="active_profile_id",
+        on_change=reset_profile_results,
+        width="stretch",
+        help="寿险与财险使用相互隔离的公司范围、目标表、关键词和比较数据。",
+    )
+    st.caption(
+        "切换后会清空当前未保存的 PDF、页码、提取表格和标准化结果，"
+        "防止不同 Profile 的数据混用。"
     )
 
 active_profile = profiles[st.session_state.active_profile_id]
@@ -408,9 +496,18 @@ if st.session_state.active_profile_runtime != active_profile.runtime_version:
 
 with st.expander("下载或核对当前 profile", expanded=False):
     st.caption(
-        f"当前版本：{active_profile.config_version}　|　"
+        f"Profile：{active_profile.config_version}　|　"
+        f"工作簿架构：v{active_profile.workbook_schema_version}　|　"
         f"比较范围：同一 profile 内跨公司、跨期　|　"
         f"目标表：{len(active_profile.tables)} 张"
+    )
+    st.caption(
+        f"v2 配置：版式变体 {len(active_profile.layout_variants)} 条，"
+        f"字段字典 {len(active_profile.field_dictionary)} 条，"
+        f"完整性规则 {len(active_profile.completeness_rules)} 条，"
+        f"公司来源 {len(active_profile.companies)} 家，"
+        f"Gold 样本 {len(active_profile.gold_samples)} 条。"
+        "旧版三表工作簿仍可上传。"
     )
     st.dataframe(
         pd.DataFrame(active_profile.tables).reindex(
@@ -427,15 +524,20 @@ with st.expander("下载或核对当前 profile", expanded=False):
         width="stretch",
     )
 
-taxonomy_path = active_profile.resource_path("normalization", "taxonomy_file")
+taxonomy_path = (
+    active_profile.resource_path("normalization", "taxonomy_file")
+    if not active_profile.field_dictionary
+    else None
+)
 rules_path = active_profile.resource_path("validation", "validation_rules_file")
 standard_template_path = active_profile.resource_path(
     "normalization",
     "standard_template_file",
 )
-company_source_path = active_profile.resource_path(
-    "monitoring",
-    "company_source_file",
+company_source_path = (
+    active_profile.resource_path("monitoring", "company_source_file")
+    if not active_profile.companies
+    else None
 )
 
 st.title("保险报告处理与分析平台")
@@ -459,14 +561,16 @@ tabs = st.tabs([
 
 with tabs[0]:
     st.subheader(f"{active_profile.profile_name}监控")
-    companies = read_companies(
-        str(company_source_path),
-        str(active_profile.monitoring["company_source_sheet"]),
-        int(active_profile.monitoring.get("company_source_header", 0) or 0),
-        str(active_profile.monitoring["company_name_column"]),
-        str(active_profile.monitoring["company_type_column"]),
-        str(active_profile.monitoring["report_url_column"]),
-    )
+    companies = prepare_embedded_companies(active_profile)
+    if companies.empty:
+        companies = read_companies(
+            str(company_source_path),
+            str(active_profile.monitoring["company_source_sheet"]),
+            int(active_profile.monitoring.get("company_source_header", 0) or 0),
+            str(active_profile.monitoring["company_name_column"]),
+            str(active_profile.monitoring["company_type_column"]),
+            str(active_profile.monitoring["report_url_column"]),
+        )
 
     year_col, quarter_col = st.columns(2)
     target_year = int(year_col.number_input("报告年度", 2020, 2050, 2026))
@@ -852,6 +956,8 @@ with tabs[1]:
                             review_required=match.review_required,
                             review_reason=match.review_reason,
                             sources=match.sources,
+                            strategy_id=match.strategy_id,
+                            table_config=match.table_config,
                         )
                     )
                     auto_text = ", ".join(map(str, match.pages)) if match.pages else "未自动找到"
@@ -1110,12 +1216,11 @@ with tabs[2]:
 
 with tabs[3]:
     st.subheader(f"{active_profile.profile_name}标准化")
-    if standard_template_path.exists():
-        st.download_button(
-            "下载标准目标表模板",
-            standard_template_path.read_bytes(),
-            standard_template_path.name,
-        )
+    st.download_button(
+        "下载标准字段模板",
+        dataframe_to_xlsx(pd.DataFrame(columns=STANDARD_COLUMNS), "标准数据"),
+        "偿付能力标准字段模板.xlsx",
+    )
 
     if (
         "standard_company_type" in st.session_state
@@ -1129,17 +1234,44 @@ with tabs[3]:
         required=True,
         key="standard_company_type",
     )
+    peer_group = st.text_input(
+        "同业分类（可选）",
+        key="standard_peer_group",
+        placeholder="例如：大型公司、银行系、外资系",
+    )
     if not st.session_state.raw_tables:
         st.info("请先在 STEP2 完成表格提取。")
     elif st.button("生成标准化长表", type="primary", key="normalize_tables"):
         normalization_diagnostics: list[dict] = []
-        st.session_state.standard_data = normalize_tables(
+        taxonomy = (
+            active_profile.taxonomy_frame()
+            if active_profile.field_dictionary
+            else read_taxonomy(str(taxonomy_path))
+        )
+        if active_profile.profile_id == "LIFE_SOLVENCY":
+            taxonomy = extend_taxonomy(taxonomy)
+        metadata = {
+            **st.session_state.metadata,
+            "来源文件": st.session_state.pdf_name,
+            "导入批次": (
+                f"{Path(st.session_state.pdf_name).stem}:"
+                f"{st.session_state.metadata.get('报告期', '')}"
+            ),
+        }
+        normalized = normalize_tables(
             st.session_state.raw_tables,
-            read_taxonomy(str(taxonomy_path)),
-            st.session_state.metadata,
+            taxonomy,
+            metadata,
             company_type,
             report_profile_id=active_profile.profile_id,
             diagnostics=normalization_diagnostics,
+            allowed_company_types=active_profile.company_types,
+            peer_group=peer_group,
+        )
+        st.session_state.standard_data = (
+            append_derived_metrics(normalized)
+            if active_profile.profile_id == "LIFE_SOLVENCY"
+            else normalized
         )
         st.session_state.normalization_diagnostics = pd.DataFrame(
             normalization_diagnostics
@@ -1159,6 +1291,19 @@ with tabs[3]:
             )
 
     if not st.session_state.standard_data.empty:
+        derived_count = int(
+            st.session_state.standard_data["指标属性"].isin(["计算", "校验"]).sum()
+        )
+        if active_profile.profile_id == "LIFE_SOLVENCY":
+            generated_codes = set(st.session_state.standard_data["指标编码"].astype(str))
+            missing_derived = [
+                item.name for item in DERIVED_METRICS if item.code not in generated_codes
+            ]
+            if missing_derived:
+                st.warning(
+                    "以下派生指标因缺少基础指标未生成："
+                    + "、".join(missing_derived)
+                )
         converted_rows = int(
             st.session_state.standard_data["备注"]
             .astype(str)
@@ -1174,6 +1319,7 @@ with tabs[3]:
         )
         with st.container(horizontal=True):
             st.metric("长表记录", len(st.session_state.standard_data), border=True)
+            st.metric("派生及校验", derived_count, border=True)
             st.metric("金额记录", amount_rows, border=True)
             st.metric("单位换算", converted_rows, border=True)
             st.metric("单位待核对", pending_unit_rows, border=True)
@@ -1201,61 +1347,189 @@ with tabs[4]:
 
 
 with tabs[5]:
-    st.subheader("同一报告类型的多公司、多期间数据集成")
+    st.subheader("多公司、多期间数据集成")
     st.caption(
-        f"当前仅集成 {active_profile.profile_id}；其他报告 profile 的数据不会参与比较。"
+        "标准窄表与外部宽表是互斥数据源；确认后将以本次预览结果作为后续 "
+        f"STEP6-STEP8 的 {active_profile.profile_id} 集成数据。"
     )
-    uploads = st.file_uploader("上传一个或多个标准数据文件", type=["xlsx"], accept_multiple_files=True, key="integrated_uploads")
-    if uploads and st.button("合并标准数据", type="primary", key="merge_standard_data"):
-        frames = []
-        skipped_profiles: set[str] = set()
-        for upload in uploads:
-            candidate = read_standard_upload(upload)
-            standardized = standardize_uploaded_frame(candidate)
-            standardized["报告类型"] = (
-                standardized["报告类型"]
-                .replace("", active_profile.profile_id)
-                .fillna(active_profile.profile_id)
-            )
-            mismatched = set(
-                standardized.loc[
-                    standardized["报告类型"] != active_profile.profile_id,
-                    "报告类型",
-                ].astype(str)
-            )
-            skipped_profiles.update(mismatched)
-            standardized = standardized[
-                standardized["报告类型"] == active_profile.profile_id
-            ]
-            if not standardized.empty:
-                frames.append(standardized)
-        if frames:
-            st.session_state.integrated_data = pd.concat(
-                frames,
-                ignore_index=True,
-            ).drop_duplicates(
-                subset=[
-                    "报告类型",
-                    "公司",
-                    "报告期",
-                    "指标编码",
-                    "期间口径",
-                    "来源页码",
-                ],
-                keep="last",
-            )
+    integration_mode = st.segmented_control(
+        "数据接入方式",
+        ["标准窄表", "外部宽表转窄表"],
+        default="标准窄表",
+        key="integration_mode",
+        width="stretch",
+    )
+
+    if integration_mode == "标准窄表":
+        uploads = st.file_uploader(
+            "上传一个或多个标准窄表文件",
+            type=["xlsx"],
+            accept_multiple_files=True,
+            key="integrated_standard_uploads",
+        )
+        if uploads and st.button(
+            "读取并预览标准窄表", type="primary", key="preview_standard_data"
+        ):
+            try:
+                frames = []
+                summaries = []
+                skipped_profiles: set[str] = set()
+                for upload in uploads:
+                    standardized = read_standard_workbook(
+                        upload.getvalue(), upload.name
+                    )
+                    standardized["报告类型"] = (
+                        standardized["报告类型"]
+                        .fillna("")
+                        .astype(str)
+                        .str.strip()
+                        .replace("", active_profile.profile_id)
+                    )
+                    mismatched = set(
+                        standardized.loc[
+                            standardized["报告类型"] != active_profile.profile_id,
+                            "报告类型",
+                        ].astype(str)
+                    )
+                    skipped_profiles.update(mismatched)
+                    standardized = standardized[
+                        standardized["报告类型"] == active_profile.profile_id
+                    ]
+                    if not standardized.empty:
+                        frames.append(standardized)
+                    summaries.append({
+                        "来源文件": upload.name,
+                        "数据类型": "标准窄表",
+                        "记录数": len(standardized),
+                    })
+                st.session_state.integration_preview = (
+                    pd.concat(frames, ignore_index=True)
+                    if frames
+                    else pd.DataFrame(columns=STANDARD_COLUMNS)
+                )
+                st.session_state.integration_sheet_summary = pd.DataFrame(summaries)
+                st.session_state.integration_mapping_summary = pd.DataFrame()
+                st.session_state.integration_logic_checks = pd.DataFrame()
+                st.session_state.integration_warnings = (
+                    ["已跳过其他报告类型的数据：" + "、".join(sorted(skipped_profiles))]
+                    if skipped_profiles
+                    else []
+                )
+                st.session_state.integration_preview_mode = "标准窄表"
+            except Exception as exc:
+                st.error(f"标准窄表读取失败：{exc}")
+    else:
+        if active_profile.profile_id != "LIFE_SOLVENCY":
+            st.info("当前外部 CROSS 宽表映射仅适用于寿险偿付能力 Profile。")
+            uploads = []
         else:
-            st.session_state.integrated_data = pd.DataFrame(
-                columns=STANDARD_COLUMNS
+            uploads = st.file_uploader(
+                "上传一个或多个外部宽表文件",
+                type=["xlsx"],
+                accept_multiple_files=True,
+                key="integrated_external_uploads",
             )
-        if skipped_profiles:
-            st.warning(
-                "已跳过其他报告类型的数据："
-                + "、".join(sorted(skipped_profiles))
+            st.caption(
+                "转换时将同步生成“行业合计”窄表记录：金额指标按有效公司求和，"
+                "比率和倍数按行业合计分子、分母重新计算；行业风险构成采用底稿中的展示名称。"
             )
+        if uploads and st.button(
+            "精确映射并转换预览", type="primary", key="preview_external_data"
+        ):
+            try:
+                base_taxonomy = (
+                    active_profile.taxonomy_frame()
+                    if active_profile.field_dictionary
+                    else read_taxonomy(str(taxonomy_path))
+                )
+                taxonomy = extend_taxonomy(base_taxonomy)
+                company_type_map = dict(zip(companies["公司"], companies["公司类别"]))
+                converted = [
+                    convert_external_workbook(
+                        upload.getvalue(),
+                        upload.name,
+                        taxonomy,
+                        company_type_map,
+                        report_profile_id=active_profile.profile_id,
+                    )
+                    for upload in uploads
+                ]
+                st.session_state.integration_preview = pd.concat(
+                    [item.data for item in converted], ignore_index=True
+                )
+                st.session_state.integration_sheet_summary = pd.concat(
+                    [item.sheet_summary for item in converted], ignore_index=True
+                )
+                st.session_state.integration_mapping_summary = pd.concat(
+                    [item.mapping_summary for item in converted], ignore_index=True
+                ).drop_duplicates(subset=["来源字段", "指标编码"], keep="last")
+                st.session_state.integration_logic_checks = pd.concat(
+                    [item.logic_checks for item in converted], ignore_index=True
+                )
+                st.session_state.integration_warnings = [
+                    warning for item in converted for warning in item.warnings
+                ]
+                st.session_state.integration_preview_mode = "外部宽表转窄表"
+            except Exception as exc:
+                st.error(f"外部宽表转换失败：{exc}")
+
+    preview = st.session_state.integration_preview
+    identity_columns = {"原始公司名称", "标准公司名称", "公司统一编码"}
+    if not identity_columns.issubset(preview.columns):
+        preview = upgrade_standard_frame(preview)
+        st.session_state.integration_preview = preview
+    if not preview.empty and st.session_state.integration_preview_mode == integration_mode:
+        st.markdown("#### 集成前预览")
+        identity_changes = preview.loc[
+            preview["原始公司名称"].astype(str).str.strip()
+            != preview["标准公司名称"].astype(str).str.strip(),
+            ["原始公司名称", "标准公司名称", "公司统一编码", "公司类型"],
+        ].drop_duplicates()
+        if not identity_changes.empty:
+            st.info(
+                f"已识别 {len(identity_changes):,} 组历史公司名称，"
+                "后续跨期分析将按标准公司名称和统一编码归集。"
+            )
+            with st.expander("查看公司历史名称映射"):
+                st.dataframe(identity_changes, width="stretch", hide_index=True)
+        if not st.session_state.integration_sheet_summary.empty:
+            st.dataframe(
+                st.session_state.integration_sheet_summary,
+                width="stretch",
+                hide_index=True,
+            )
+        for warning in st.session_state.integration_warnings:
+            st.warning(warning)
+        if not st.session_state.integration_mapping_summary.empty:
+            with st.expander("查看指标精确映射"):
+                st.dataframe(
+                    st.session_state.integration_mapping_summary,
+                    width="stretch",
+                    hide_index=True,
+                )
+        if not st.session_state.integration_logic_checks.empty:
+            with st.expander("查看派生指标逻辑校验", expanded=True):
+                st.dataframe(
+                    st.session_state.integration_logic_checks,
+                    width="stretch",
+                    hide_index=True,
+                )
+        st.caption(
+            f"转换后共 {len(preview):,} 条窄表记录。确认后将替换当前集成数据，"
+            "不与另一接入方式并行合并，也不额外去重。"
+        )
+        st.dataframe(preview.head(1000), width="stretch", hide_index=True)
+        if st.button("确认采用该数据集", type="primary", key="confirm_integrated_data"):
+            st.session_state.integrated_data = preview.copy()
+            st.success("已更新集成数据，STEP6-STEP8 将使用本次确认的数据集。")
     if not st.session_state.integrated_data.empty:
-        st.dataframe(st.session_state.integrated_data, use_container_width=True, hide_index=True)
-        st.download_button("下载行业集成数据", dataframe_to_xlsx(st.session_state.integrated_data, "标准数据"), "偿付能力行业集成数据.xlsx")
+        st.markdown("#### 当前已确认集成数据")
+        st.dataframe(st.session_state.integrated_data, width="stretch", hide_index=True)
+        st.download_button(
+            "下载行业集成数据",
+            dataframe_to_xlsx(st.session_state.integrated_data, "标准数据"),
+            "偿付能力行业集成数据.xlsx",
+        )
 
 
 with tabs[6]:

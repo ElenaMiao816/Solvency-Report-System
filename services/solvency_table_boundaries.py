@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 
 TABLE_ITEM_BOUNDARIES = {
@@ -302,7 +302,16 @@ def item_hits_in_rows(rows: Sequence[Sequence[str]], items: Iterable[str]) -> tu
     return tuple(item for item in items if any(row_has_item(row, item) for row in rows))
 
 
-def boundary_variants(table_id: str) -> tuple[dict, ...]:
+def boundary_variants(
+    table_id: str,
+    table_config: Mapping[str, Any] | None = None,
+) -> tuple[dict, ...]:
+    configured_variants = tuple(
+        dict(item)
+        for item in (table_config or {}).get("boundary_variants", ())
+    )
+    if configured_variants:
+        return configured_variants
     boundary = TABLE_ITEM_BOUNDARIES.get(table_id, {})
     configured = tuple(boundary.get("variants", ()))
     if not configured:
@@ -327,9 +336,12 @@ def end_item_groups(
     return (end_items,) if end_items else ()
 
 
-def boundary_items(table_id: str) -> tuple[str, ...]:
+def boundary_items(
+    table_id: str,
+    table_config: Mapping[str, Any] | None = None,
+) -> tuple[str, ...]:
     items: list[str] = []
-    for boundary in boundary_variants(table_id):
+    for boundary in boundary_variants(table_id, table_config):
         grouped = tuple(
             item
             for group in boundary.get("required_item_groups", ())
@@ -350,12 +362,19 @@ def boundary_items(table_id: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(items))
 
 
-def boundary_instruction(table_id: str) -> str:
-    variants = boundary_variants(table_id)
+def boundary_instruction(
+    table_id: str,
+    table_config: Mapping[str, Any] | None = None,
+) -> str:
+    variants = boundary_variants(table_id, table_config)
     if not variants:
         return ""
     if len(variants) > 1:
-        configured = TABLE_ITEM_BOUNDARIES.get(table_id, {})
+        configured = (
+            dict(table_config or {})
+            if table_config and table_config.get("boundary_variants")
+            else TABLE_ITEM_BOUNDARIES.get(table_id, {})
+        )
         scope_name = str(configured.get("scope_name", table_id))
         variant_note = str(configured.get("variant_note", "")).strip()
         descriptions: list[str] = []
@@ -404,6 +423,33 @@ def boundary_instruction(table_id: str) -> str:
         instruction += f"不得输出项目：{exclusions}。"
     return instruction
 
+
+def boundary_instruction_for_table(table: dict) -> str:
+    """Build boundary guidance from Profile v2 variants, with code fallback."""
+    table_id = str(table.get("table_id", ""))
+    variants = tuple(table.get("boundary_variants") or ())
+    if not variants:
+        return boundary_instruction(table_id, table)
+    descriptions: list[str] = []
+    for index, boundary in enumerate(variants, start=1):
+        start_items = tuple(boundary.get("start_items", ()))
+        groups = end_item_groups(table_id, boundary)
+        if not start_items or not groups or not groups[0]:
+            continue
+        name = str(boundary.get("name", f"版式{index}"))
+        endings = "、".join(group[0] for group in groups if group)
+        descriptions.append(
+            f"{index}. {name}：从“{start_items[0]}”类项目开始，"
+            f"以页面实际披露的“{endings}”类项目结束"
+        )
+    if not descriptions:
+        return boundary_instruction(table_id, table)
+    return (
+        "按 Profile v2 版式配置识别并保留首尾项目："
+        + "；".join(descriptions)
+        + "。若跨页，必须保留首尾之间的全部连续物理页。"
+    )
+
 def _find_row(rows: Sequence[Sequence[str]], items: Sequence[str], start: int = 0) -> int | None:
     for index in range(max(0, start), len(rows)):
         if any(row_has_item(rows[index], item) for item in items):
@@ -427,8 +473,15 @@ def _is_pagination_row(row: Sequence[str]) -> bool:
     )
 
 
-def _canonical_header(table_id: str, width: int) -> list[str]:
-    configured = list(TABLE_CANONICAL_HEADERS.get(table_id, ()))
+def _canonical_header(
+    table_id: str,
+    width: int,
+    table_config: Mapping[str, Any] | None = None,
+) -> list[str]:
+    configured = list(
+        (table_config or {}).get("canonical_headers")
+        or TABLE_CANONICAL_HEADERS.get(table_id, ())
+    )
     return [
         configured[index] if index < len(configured) else f"列{index + 1}"
         for index in range(width)
@@ -450,9 +503,10 @@ def enforce_output_boundaries(
     rows: list[list[str]],
     *,
     require_complete: bool = True,
+    table_config: Mapping[str, Any] | None = None,
 ) -> tuple[list[list[str]], str]:
     """Trim reconstructed rows to the declared first and last business items."""
-    variants = boundary_variants(table_id)
+    variants = boundary_variants(table_id, table_config)
     if not variants or not rows:
         return rows, ""
 
@@ -539,7 +593,7 @@ def enforce_output_boundaries(
 
     if header is not None and _is_generic_header(header):
         width = max(len(header), max((len(row) for row in bounded), default=0))
-        header = _canonical_header(table_id, width)
+        header = _canonical_header(table_id, width, table_config)
     if header is not None and header not in bounded:
         bounded = [header, *bounded]
     return bounded, (

@@ -122,6 +122,43 @@ class TableStrategyRegistryTests(unittest.TestCase):
         self.assertIn("一句或两句", prompt)
         self.assertIn("近三年平均综合投资收益率|数值", prompt)
 
+    def test_profile_prompt_overrides_registered_compatibility_prompt(self):
+        strategy = resolve_table_strategy(
+            "THREE_YEAR_INVESTMENT_RETURN",
+            table_config={
+                "prompt_single_page_note": "PROFILE_V2_PROMPT_MARKER",
+            },
+        )
+        prompt = strategy.build_prompt(PromptRequest(
+            mode="single_page",
+            table_id=strategy.table_id,
+            table_name="近三年投资收益率",
+            page_number=8,
+        ))
+
+        self.assertIn("PROFILE_V2_PROMPT_MARKER", prompt)
+
+    def test_profile_postprocess_actions_can_disable_legacy_special_cleaning(self):
+        calls = []
+
+        def normalize(table_id, rows):
+            calls.append(table_id)
+            return rows, "normalized"
+
+        strategy = resolve_table_strategy(
+            "THREE_YEAR_INVESTMENT_RETURN",
+            table_config={"postprocess_actions": ["trim_adjacent_rows"]},
+        )
+        rows, notes = strategy.postprocess(PostprocessRequest(
+            table_id=strategy.table_id,
+            rows=[["项目", "数值"]],
+            normalize_three_year=normalize,
+        ))
+
+        self.assertEqual(calls, [])
+        self.assertEqual(rows, [["项目", "数值"]])
+        self.assertEqual(notes, ())
+
     def test_boundary_handler_controls_operating_grid_variant(self):
         calls: list[tuple[str, bool]] = []
 
