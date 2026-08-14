@@ -23,7 +23,6 @@ from .solvency_disclosure_normalizer import (
 from .solvency_pdf_locator import PageMatch
 from .solvency_table_boundaries import (
     TableBoundaryError,
-    boundary_instruction,
     boundary_instruction_for_table,
     boundary_items,
     boundary_variants,

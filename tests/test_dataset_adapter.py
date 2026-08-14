@@ -6,6 +6,7 @@ import unittest
 import pandas as pd
 
 from services.solvency_dataset_adapter import (
+    add_missing_derived_metrics,
     append_derived_metrics,
     calculate_derived_values,
     calculate_industry_values,
@@ -50,6 +51,12 @@ class DatasetAdapterTests(unittest.TestCase):
         self.assertAlmostEqual(result["FEATURE_FACTOR_IMPACT"], 9.0)
         self.assertAlmostEqual(result["FEATURE_FACTOR_CHECK"], 9.0 / 81.0)
         self.assertAlmostEqual(result["POLICY_SURPLUS_TO_INSURANCE_LIABILITIES"], 36.0 / 300.0)
+        self.assertAlmostEqual(result["CORE_T1_TO_ACTUAL_CAPITAL"], 120.0 / 200.0)
+        self.assertAlmostEqual(result["CORE_T2_TO_ACTUAL_CAPITAL"], 20.0 / 200.0)
+        self.assertAlmostEqual(result["ANC_T1_TO_ACTUAL_CAPITAL"], 50.0 / 200.0)
+        self.assertAlmostEqual(result["POLICY_SURPLUS_CORE_TO_CORE_CAPITAL"], 30.0 / 140.0)
+        self.assertAlmostEqual(result["LIFE_INSURANCE_RISK_TO_QUANT_CAPITAL"], 40.0 / 90.0)
+        self.assertAlmostEqual(result["DIVERSIFICATION_EFFECT_TO_QUANT_CAPITAL"], -10.0 / 90.0)
         self.assertEqual(result["POLICY_SURPLUS_CORE_BAND"], "(0,20%]")
 
     def test_appends_derived_and_lineage_columns(self):
@@ -83,6 +90,35 @@ class DatasetAdapterTests(unittest.TestCase):
         self.assertEqual(ratio["来源类型"], "系统计算")
         self.assertEqual(ratio["期间口径"], "本季度末数")
         self.assertTrue(ratio["计算逻辑"])
+
+    def test_fills_missing_derived_metrics_without_overwriting_reviewed_values(self):
+        rows = [
+            {
+                "公司": "测试人寿",
+                "报告类型": "LIFE_SOLVENCY",
+                "报告年度": 2025,
+                "报告季度": "Q4",
+                "报告期": "2025Q4",
+                "期间口径": "本季度末数",
+                "指标编码": code,
+                "指标名称": code,
+                "数值": value,
+            }
+            for code, value in (
+                ("ACTUAL_CAPITAL", 200.0),
+                ("CORE_T1_CAPITAL", 120.0),
+                ("CORE_T2_CAPITAL", 20.0),
+                ("CORE_T1_TO_ACTUAL_CAPITAL", 0.61),
+            )
+        ]
+        result = add_missing_derived_metrics(pd.DataFrame(rows))
+        reviewed = result[result["指标编码"] == "CORE_T1_TO_ACTUAL_CAPITAL"]
+        generated = result[result["指标编码"] == "CORE_T2_TO_ACTUAL_CAPITAL"]
+        self.assertEqual(len(reviewed), 1)
+        self.assertAlmostEqual(reviewed.iloc[0]["数值"], 0.61)
+        self.assertEqual(len(generated), 1)
+        self.assertAlmostEqual(generated.iloc[0]["数值"], 0.1)
+        self.assertEqual(generated.iloc[0]["来源类型"], "系统计算")
 
     def test_reads_standard_headers_from_first_or_third_row(self):
         base = pd.DataFrame([{"公司": "测试人寿", "指标编码": "A", "指标名称": "指标A", "数值": 1}])
@@ -195,7 +231,6 @@ class DatasetAdapterTests(unittest.TestCase):
         self.assertEqual(industry.loc["INDUSTRY_LIFE_INSURANCE_RISK", "来源类型"], "系统计算")
         self.assertEqual(industry.loc["INDUSTRY_LIFE_INSURANCE_RISK", "指标属性"], "行业计算")
         self.assertIn("重命名", industry.loc["INDUSTRY_LIFE_INSURANCE_RISK", "备注"])
-
 
 if __name__ == "__main__":
     unittest.main()

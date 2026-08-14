@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import io
 import json
 import math
 import re
@@ -11,7 +10,6 @@ from threading import Lock
 from typing import Callable, Mapping
 
 import fitz
-import pdfplumber
 import requests
 
 from .llm_config import model_request_parameters, normalize_model_id
@@ -23,9 +21,6 @@ from .solvency_ai_table_extractor import (
     ExtractionQualityError,
     extract_tables_with_llm,
     PageGrid,
-    TEXT_MODE,
-    TEXT_RETRY_MODE,
-    VISION_MODE,
     SOURCE_ITEM_RECALL_RATIO,
     _cell_has_disclosed_value,
     _compact,
@@ -47,7 +42,6 @@ from .solvency_ai_table_extractor import (
 )
 from .solvency_table_boundaries import (
     TableBoundaryError,
-    boundary_instruction,
     boundary_instruction_for_table,
     boundary_items,
     enforce_output_boundaries,
@@ -69,7 +63,6 @@ from .solvency_table_extractor import (
     TABLE_EXCLUSIONS,
     TABLE_HEADERS,
     TABLE_SIGNATURES,
-    TABLE_START_MARKERS,
     ExtractedTable,
     UnitRecord,
 )
