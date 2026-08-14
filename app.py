@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import html
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -14,6 +15,7 @@ import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 
+from dashboard_components import render_kpmg_palette, render_print_control
 from services.report_profiles import (
     ProfileValidationError,
     ReportProfile,
@@ -30,11 +32,37 @@ from services.solvency_hybrid_pipeline import (
     locate_tables_hybrid,
 )
 from services.solvency_dataset_adapter import (
+    add_missing_derived_metrics,
     append_derived_metrics,
     convert_external_workbook,
     read_standard_workbook,
 )
+from services.solvency_step6_analysis import (
+    CHART_TYPES,
+    COMPANY_REPORT,
+    INDUSTRY_REPORT,
+    NO_COMPANY_TYPE_FILTER,
+    build_comparison_chart,
+    companies_for_quick_selection,
+    default_periods,
+    filter_analysis_frame,
+    metric_options,
+    nonblank_values,
+    prepare_analysis_frame,
+    report_scope_frame,
+    sort_report_periods,
+    visualization_metric_frame,
+)
 from services.solvency_metric_registry import DERIVED_METRICS, extend_taxonomy
+from services.solvency_financing_analysis import read_major_financing_workbook
+from services.solvency_navigation import (
+    KPMG_DEFAULT_COLORS,
+    OVERVIEW_LEVEL,
+    PRINT_ALL_LABEL,
+    chart_names,
+    first_levels_for_codes,
+    second_levels,
+)
 from services.solvency_gold_standard import (
     evaluate_gold_case,
     find_gold_case,
@@ -44,7 +72,6 @@ from services.solvency_normalizer import (
     STANDARD_COLUMNS,
     load_taxonomy,
     normalize_tables,
-    standardize_uploaded_frame,
     upgrade_standard_frame,
 )
 from services.solvency_pdf_locator import (
@@ -63,9 +90,21 @@ PROFILE_DIR = CONFIG_DIR / "report_profiles"
 DEFAULT_PROFILE_ID = "LIFE_SOLVENCY"
 STANDARD_SCHEMA_VERSION = 2
 GOLD_MANIFEST = ROOT / "gold_standard" / "manifest.json"
+WORKFLOW_TAB_LABELS = (
+    "STEP0 报告监控",
+    "STEP1 页码定位",
+    "STEP2 表格提取",
+    "STEP3 标准化",
+    "STEP4 勾稽检查",
+    "STEP5 数据集成",
+    "STEP6 自定义分析",
+    "STEP7 公司报告",
+    "STEP8 行业分析",
+)
+ANALYSIS_TAB_LABELS = WORKFLOW_TAB_LABELS[6:]
 
 
-st.set_page_config(page_title="偿付能力报告平台", page_icon="🛡️", layout="wide")
+st.set_page_config(page_title="保险公司报告分析处理平台", page_icon="🛡️", layout="wide")
 st.markdown(
     """
     <style>
@@ -73,15 +112,55 @@ st.markdown(
        padding-top，否则首个 Profile 操作区会被 Deploy/菜单工具栏覆盖。 */
     [data-testid="stMainBlockContainer"] {padding-bottom: 2rem;}
     h1, h2, h3 {color:#00338D;}
+    .platform-page-heading h1 {margin:0 0 0.35rem;}
+    .platform-profile-caption {
+      margin:0 0 0.75rem; color:rgba(49,51,63,.6); font-size:0.875rem;
+    }
     [data-testid="stMetric"] {background:#F4F7FC; border-left:4px solid #00338D; padding:12px; border-radius:5px;}
+    @page { size: 13.333in 7.5in; margin: 0.35in; }
+    @media print {
+      [data-testid="stSidebar"],
+      [data-testid="stHeader"],
+      [data-testid="stToolbar"],
+      [data-testid="stDecoration"],
+      [data-testid="stStatusWidget"],
+      [data-testid="stFileUploader"],
+      [data-testid="stSegmentedControl"],
+      [data-testid="stSelectbox"],
+      [data-testid="stMultiSelect"],
+      [data-testid="stButton"],
+      [data-testid="stDownloadButton"],
+      div[role="tablist"],
+      .platform-page-heading,
+      footer { display: none !important; }
+      [data-testid="stElementContainer"]:has(.platform-page-heading) {
+        display: none !important;
+      }
+      html, body, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+        width: 100% !important;
+        max-width: none !important;
+        overflow: visible !important;
+        background: #ffffff !important;
+      }
+      [data-testid="stMainBlockContainer"] {
+        width: 100% !important;
+        max-width: none !important;
+        padding: 0 !important;
+      }
+      [data-testid="stExpander"] details > div { display: block !important; }
+      [data-testid="stMetric"], [data-testid="stDataFrame"], [data-testid="stExpander"] {
+        break-inside: avoid-page;
+      }
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 
-def initialize_state() -> None:
-    defaults = {
+def new_state_defaults() -> dict[str, object]:
+    """Return fresh per-session values shared by initialization and profile reset."""
+    return {
         "pdf_bytes": None,
         "pdf_name": "",
         "metadata": {},
@@ -105,6 +184,7 @@ def initialize_state() -> None:
         "integration_logic_checks": pd.DataFrame(),
         "integration_warnings": [],
         "integration_preview_mode": "",
+        "major_financing_data": pd.DataFrame(),
         "standard_schema_version": 0,
         "validation_results": pd.DataFrame(),
         "monitor_results": pd.DataFrame(),
@@ -119,7 +199,10 @@ def initialize_state() -> None:
         "active_profile_id": DEFAULT_PROFILE_ID,
         "active_profile_runtime": "",
     }
-    for key, value in defaults.items():
+
+
+def initialize_state() -> None:
+    for key, value in new_state_defaults().items():
         if key not in st.session_state:
             st.session_state[key] = value
     if st.session_state.standard_schema_version < STANDARD_SCHEMA_VERSION:
@@ -130,36 +213,18 @@ def initialize_state() -> None:
 
 def reset_profile_results() -> None:
     """Clear report-specific state when the user switches Profile."""
-    empty_values = {
-        "pdf_bytes": None,
-        "pdf_name": "",
-        "metadata": {},
-        "page_matches": [],
-        "auto_page_matches": [],
-        "raw_tables": [],
-        "table_candidates": {},
-        "selected_table_candidates": {},
-        "ai_extraction_logs": [],
-        "ai_workbook_bytes": b"",
-        "standard_data": pd.DataFrame(columns=STANDARD_COLUMNS),
-        "integrated_data": pd.DataFrame(columns=STANDARD_COLUMNS),
-        "integration_preview": pd.DataFrame(columns=STANDARD_COLUMNS),
-        "integration_sheet_summary": pd.DataFrame(),
-        "integration_mapping_summary": pd.DataFrame(),
-        "integration_logic_checks": pd.DataFrame(),
-        "integration_warnings": [],
-        "integration_preview_mode": "",
-        "validation_results": pd.DataFrame(),
-        "monitor_results": pd.DataFrame(),
-        "monitor_single_result": None,
-        "edited_pages": {},
-        "pages_confirmed": False,
-        "normalization_diagnostics": pd.DataFrame(),
-        "locator_config_version": "",
-        "extraction_grid_cache": {},
-        "extraction_image_cache": {},
-        "active_profile_runtime": "",
-    }
+    empty_values = new_state_defaults()
+    for key in (
+        "llm_base_url",
+        "llm_model",
+        "llm_api_key",
+        "auto_vision_retry",
+        "force_vision_mode",
+        "standard_schema_version",
+        "extraction_cache_lock",
+        "active_profile_id",
+    ):
+        empty_values.pop(key)
     for key, value in empty_values.items():
         st.session_state[key] = value
     st.session_state.pop("solvency_target_tables", None)
@@ -188,6 +253,37 @@ def read_uploaded_profile(
 @st.cache_data(show_spinner=False)
 def export_profile_workbook(profile: ReportProfile) -> bytes:
     return profile_workbook_bytes(profile)
+
+
+@st.cache_data(show_spinner=False)
+def prepare_visualization_source(
+    frame: pd.DataFrame,
+    report_profile_id: str,
+) -> tuple[pd.DataFrame, tuple[str, ...]]:
+    enriched = (
+        add_missing_derived_metrics(frame)
+        if report_profile_id == "LIFE_SOLVENCY"
+        else frame
+    )
+    return prepare_analysis_frame(enriched, report_profile_id)
+
+
+@st.cache_data(show_spinner=False)
+def read_step6_analysis_workbook(
+    workbook_bytes: bytes,
+    source_name: str,
+    report_profile_id: str,
+) -> tuple[pd.DataFrame, tuple[str, ...]]:
+    frame = read_standard_workbook(workbook_bytes, source_name)
+    return prepare_visualization_source(frame, report_profile_id)
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def read_major_financing_upload(
+    workbook_bytes: bytes,
+    source_name: str,
+) -> pd.DataFrame:
+    return read_major_financing_workbook(workbook_bytes, source_name)
 
 
 @st.cache_data(show_spinner=False)
@@ -248,6 +344,103 @@ def prepare_embedded_companies(profile: ReportProfile) -> pd.DataFrame:
     return companies[companies["公司"] != ""].drop_duplicates(
         subset=["公司"], keep="last",
     ).reset_index(drop=True)
+
+
+def keep_valid_widget_state(
+    key: str,
+    options: list[str],
+    *,
+    multiple: bool = False,
+) -> None:
+    """Discard stale selections when upstream Step6 filters change."""
+    if key not in st.session_state:
+        return
+    if multiple:
+        current = st.session_state.get(key) or []
+        st.session_state[key] = [value for value in current if value in options]
+    elif st.session_state.get(key) not in options:
+        del st.session_state[key]
+
+
+def render_all_chart_navigation(chart_options: list[str]) -> None:
+    """Render read-only chart rows with the same visual rhythm as sidebar radios."""
+    if not chart_options:
+        return
+    rows = "".join(
+        (
+            '<div class="kpmg-nav-all-item">'
+            '<span class="kpmg-nav-all-dot" aria-hidden="true"></span>'
+            f'<span>{html.escape(str(name))}</span>'
+            "</div>"
+        )
+        for name in chart_options
+    )
+    st.markdown(
+        (
+            '<div class="kpmg-nav-all-charts">'
+            '<div class="kpmg-nav-all-label">具体图表（全部展示）</div>'
+            f"{rows}</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def navigation_metric_codes(frame: pd.DataFrame) -> list[str]:
+    if "指标编码" not in frame.columns:
+        return []
+    return frame["指标编码"].dropna().astype(str).str.strip().tolist()
+
+
+def render_report_navigation(
+    *,
+    title: str,
+    container_key: str,
+    state_prefix: str,
+    available_codes: list[str],
+    print_key: str,
+    industry: bool = False,
+) -> None:
+    with st.container(key=container_key):
+        st.markdown(f"### {title}")
+
+    first_options = (
+        first_levels_for_codes(available_codes, industry=True)
+        if industry
+        else first_levels_for_codes(available_codes)
+    )
+    level_one_key = f"{state_prefix}_level_one"
+    keep_valid_widget_state(level_one_key, first_options)
+    main_nav = st.radio("📁 一级模块", first_options, key=level_one_key)
+    if main_nav == PRINT_ALL_LABEL:
+        render_print_control(key=print_key)
+        return
+
+    navigation_level = OVERVIEW_LEVEL if industry else main_nav
+    second_options = [
+        "全部",
+        *second_levels(
+            navigation_level,
+            industry=industry,
+            available_codes=available_codes,
+        ),
+    ]
+    level_two_key = f"{state_prefix}_level_two"
+    keep_valid_widget_state(level_two_key, second_options)
+    second_nav = st.radio("📂 二级模块", second_options, key=level_two_key)
+    chart_options = chart_names(
+        navigation_level,
+        second_nav,
+        industry=industry,
+        available_codes=available_codes,
+    )
+    chart_key = f"{state_prefix}_chart"
+    if second_nav == "全部":
+        st.session_state.pop(chart_key, None)
+        render_all_chart_navigation(chart_options)
+    else:
+        keep_valid_widget_state(chart_key, chart_options)
+    if chart_options and second_nav != "全部":
+        st.radio("具体图表", chart_options, key=chart_key)
 
 
 def target_period_terms(
@@ -413,6 +606,7 @@ def parse_page_numbers(raw_value: str, total_pages: int) -> tuple[list[int], lis
     return valid_pages, invalid_values
 
 
+@st.cache_data(show_spinner=False, max_entries=8)
 def dataframe_to_xlsx(frame: pd.DataFrame, sheet_name: str) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -420,109 +614,109 @@ def dataframe_to_xlsx(frame: pd.DataFrame, sheet_name: str) -> bytes:
     return output.getvalue()
 
 
-def read_standard_upload(upload) -> pd.DataFrame:
-    workbook_bytes = upload.getvalue()
-    for header in (0, 2):
-        candidate = pd.read_excel(
-            io.BytesIO(workbook_bytes),
-            sheet_name="标准数据",
-            header=header,
-        )
-        if {"公司", "指标编码", "期间口径"}.issubset(candidate.columns):
-            return candidate
-    raise ValueError(
-        f"{upload.name} 的“标准数据”工作表未找到公司、指标编码和期间口径表头。"
-    )
+def sync_analysis_navigation_from_tab() -> None:
+    target = st.session_state.get("workflow_main_tab", "")
+    if target in ANALYSIS_TAB_LABELS:
+        st.session_state.analysis_page_navigation = target
 
 
 initialize_state()
 
 profiles = read_profile_registry()
-uploaded_profile_file = None
-with st.expander("上传报告 profile 配置（高级）", expanded=False):
-    st.caption(
-        "目标表和定位关键词可以通过配置工作簿维护。上传后先进行结构与引用校验，"
-        "仅在当前浏览器会话中生效，不会覆盖项目内的正式配置。"
-    )
-    uploaded_profile_file = st.file_uploader(
-        "上传报告 profile 配置工作簿",
-        type=["xlsx"],
-        key="report_profile_upload",
-    )
-    if uploaded_profile_file is not None:
-        uploaded_bytes = uploaded_profile_file.getvalue()
-        try:
-            uploaded_profile = read_uploaded_profile(
-                uploaded_bytes,
-                uploaded_profile_file.name,
-            )
-            profiles[uploaded_profile.profile_id] = uploaded_profile
-            st.success(
-                f"配置校验通过：{uploaded_profile.profile_name}，"
-                f"共 {len(uploaded_profile.tables)} 张目标表。"
-            )
-        except ProfileValidationError as exc:
-            st.error(f"配置工作簿未启用：{exc}")
+with st.expander(
+    "报告 Profile 设置",
+    expanded=False,
+    icon=":material/tune:",
+):
+    profile_switch_tab, profile_upload_tab, profile_review_tab = st.tabs([
+        "切换报告类型",
+        "上传高级配置",
+        "下载或核对",
+    ])
 
-profile_ids = list(profiles)
-if st.session_state.active_profile_id not in profile_ids:
-    st.session_state.active_profile_id = profile_ids[0]
+    with profile_upload_tab:
+        st.caption(
+            "目标表和定位关键词可以通过配置工作簿维护。上传后先进行结构与引用校验，"
+            "仅在当前浏览器会话中生效，不会覆盖项目内的正式配置。"
+        )
+        uploaded_profile_file = st.file_uploader(
+            "上传报告 Profile 配置工作簿",
+            type=["xlsx"],
+            key="report_profile_upload",
+        )
+        if uploaded_profile_file is not None:
+            uploaded_bytes = uploaded_profile_file.getvalue()
+            try:
+                uploaded_profile = read_uploaded_profile(
+                    uploaded_bytes,
+                    uploaded_profile_file.name,
+                )
+                profiles[uploaded_profile.profile_id] = uploaded_profile
+                st.success(
+                    f"配置校验通过：{uploaded_profile.profile_name}，"
+                    f"共 {len(uploaded_profile.tables)} 张目标表。"
+                )
+            except ProfileValidationError as exc:
+                st.error(f"配置工作簿未启用：{exc}")
 
-with st.container(border=True):
-    st.markdown("#### 切换报告类型")
-    st.segmented_control(
-        "当前报告类型",
-        profile_ids,
-        format_func=lambda profile_id: profiles[profile_id].profile_name,
-        selection_mode="single",
-        required=True,
-        key="active_profile_id",
-        on_change=reset_profile_results,
-        width="stretch",
-        help="寿险与财险使用相互隔离的公司范围、目标表、关键词和比较数据。",
-    )
-    st.caption(
-        "切换后会清空当前未保存的 PDF、页码、提取表格和标准化结果，"
-        "防止不同 Profile 的数据混用。"
-    )
+    profile_ids = list(profiles)
+    if st.session_state.active_profile_id not in profile_ids:
+        st.session_state.active_profile_id = profile_ids[0]
 
-active_profile = profiles[st.session_state.active_profile_id]
-if st.session_state.active_profile_runtime != active_profile.runtime_version:
-    st.session_state.active_profile_runtime = active_profile.runtime_version
-    st.session_state.locator_config_version = ""
-    st.session_state.monitor_results = pd.DataFrame()
-    st.session_state.monitor_single_result = None
-    st.session_state.pop("solvency_target_tables", None)
+    with profile_switch_tab:
+        st.segmented_control(
+            "当前报告类型",
+            profile_ids,
+            format_func=lambda profile_id: profiles[profile_id].profile_name,
+            selection_mode="single",
+            required=True,
+            key="active_profile_id",
+            on_change=reset_profile_results,
+            width="stretch",
+            help="寿险与财险使用相互隔离的公司范围、目标表、关键词和比较数据。",
+        )
+        st.caption(
+            "切换后会清空当前未保存的 PDF、页码、提取表格和标准化结果，"
+            "防止不同 Profile 的数据混用。"
+        )
 
-with st.expander("下载或核对当前 profile", expanded=False):
-    st.caption(
-        f"Profile：{active_profile.config_version}　|　"
-        f"工作簿架构：v{active_profile.workbook_schema_version}　|　"
-        f"比较范围：同一 profile 内跨公司、跨期　|　"
-        f"目标表：{len(active_profile.tables)} 张"
-    )
-    st.caption(
-        f"v2 配置：版式变体 {len(active_profile.layout_variants)} 条，"
-        f"字段字典 {len(active_profile.field_dictionary)} 条，"
-        f"完整性规则 {len(active_profile.completeness_rules)} 条，"
-        f"公司来源 {len(active_profile.companies)} 家，"
-        f"Gold 样本 {len(active_profile.gold_samples)} 条。"
-        "旧版三表工作簿仍可上传。"
-    )
-    st.dataframe(
-        pd.DataFrame(active_profile.tables).reindex(
-            columns=["table_id", "table_name", "max_pages"],
-        ),
-        width="stretch",
-        hide_index=True,
-    )
-    st.download_button(
-        "下载当前 profile 配置工作簿",
-        export_profile_workbook(active_profile),
-        f"{active_profile.profile_id}_profile.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        width="stretch",
-    )
+    active_profile = profiles[st.session_state.active_profile_id]
+    if st.session_state.active_profile_runtime != active_profile.runtime_version:
+        st.session_state.active_profile_runtime = active_profile.runtime_version
+        st.session_state.locator_config_version = ""
+        st.session_state.monitor_results = pd.DataFrame()
+        st.session_state.monitor_single_result = None
+        st.session_state.pop("solvency_target_tables", None)
+
+    with profile_review_tab:
+        st.caption(
+            f"Profile：{active_profile.config_version}　|　"
+            f"工作簿架构：v{active_profile.workbook_schema_version}　|　"
+            f"比较范围：同一 profile 内跨公司、跨期　|　"
+            f"目标表：{len(active_profile.tables)} 张"
+        )
+        st.caption(
+            f"v2 配置：版式变体 {len(active_profile.layout_variants)} 条，"
+            f"字段字典 {len(active_profile.field_dictionary)} 条，"
+            f"完整性规则 {len(active_profile.completeness_rules)} 条，"
+            f"公司来源 {len(active_profile.companies)} 家，"
+            f"Gold 样本 {len(active_profile.gold_samples)} 条。"
+            "旧版三表工作簿仍可上传。"
+        )
+        st.dataframe(
+            pd.DataFrame(active_profile.tables).reindex(
+                columns=["table_id", "table_name", "max_pages"],
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+        st.download_button(
+            "下载当前 Profile 配置工作簿",
+            export_profile_workbook(active_profile),
+            f"{active_profile.profile_id}_profile.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            width="stretch",
+        )
 
 taxonomy_path = (
     active_profile.resource_path("normalization", "taxonomy_file")
@@ -530,33 +724,68 @@ taxonomy_path = (
     else None
 )
 rules_path = active_profile.resource_path("validation", "validation_rules_file")
-standard_template_path = active_profile.resource_path(
-    "normalization",
-    "standard_template_file",
-)
 company_source_path = (
     active_profile.resource_path("monitoring", "company_source_file")
     if not active_profile.companies
     else None
 )
 
-st.title("保险报告处理与分析平台")
-st.caption(
-    f"当前 profile：{active_profile.profile_name}（{active_profile.profile_id}）｜"
-    "支持同一报告类型内跨公司、跨期比较"
+st.markdown(
+    (
+        '<section class="platform-page-heading">'
+        '<h1>保险报告处理与分析平台</h1>'
+        '<p class="platform-profile-caption">'
+        f"当前 profile：{active_profile.profile_name}（{active_profile.profile_id}）｜"
+        "支持同一报告类型内跨公司、跨期比较"
+        "</p></section>"
+    ),
+    unsafe_allow_html=True,
 )
 
-tabs = st.tabs([
-    "STEP0 报告监控",
-    "STEP1 页码定位",
-    "STEP2 表格提取",
-    "STEP3 标准化",
-    "STEP4 勾稽检查",
-    "STEP5 数据集成",
-    "STEP6 自定义分析",
-    "STEP7 公司报告",
-    "STEP8 行业分析",
-])
+tabs = st.tabs(
+    WORKFLOW_TAB_LABELS,
+    key="workflow_main_tab",
+    on_change=sync_analysis_navigation_from_tab,
+)
+active_workflow_tab = st.session_state.get(
+    "workflow_main_tab",
+    WORKFLOW_TAB_LABELS[0],
+)
+analysis_tabs_active = active_workflow_tab in ANALYSIS_TAB_LABELS
+if analysis_tabs_active:
+    st.markdown(
+        """
+        <style>
+        [data-testid="stAppViewContainer"] { background:#F4F7FC; }
+        [data-testid="stSidebar"] { background:#FFFFFF; border-right:1px solid #D9E2F1; }
+        [data-testid="stSidebar"] h3 { color:#0C233C !important; font-size:18px !important; }
+        [data-testid="stSidebar"] [data-testid="stRadio"] { margin-bottom:8px; }
+        [data-testid="stExpander"] details {
+          border:1px solid #D5DEEC; border-radius:8px; background:#F7F9FC;
+        }
+        [data-testid="stExpander"] details[open] { border-color:#B8C9E5; }
+        [data-testid="stExpander"] summary { color:#0C233C; font-weight:650; }
+        .st-key-kpmg_company_nav_title, .st-key-kpmg_industry_nav_title {
+          background:#FFFFFF; border-radius:8px; padding:8px 10px;
+          box-shadow:0 4px 14px rgba(12,35,60,.06); margin:8px 0 10px 0;
+        }
+        .kpmg-nav-all-charts {
+          margin:0 0 8px; color:#0C233C; font-family:inherit;
+          font-size:0.875rem; font-weight:400; line-height:1.4;
+        }
+        .kpmg-nav-all-label { margin:0 0 4px; font:inherit; }
+        .kpmg-nav-all-item {
+          display:flex; align-items:center; gap:8px; min-height:24px;
+          margin:0; padding:0; font:inherit;
+        }
+        .kpmg-nav-all-dot {
+          width:14px; height:14px; flex:0 0 14px; box-sizing:border-box;
+          border:1px solid #CDD4DE; border-radius:50%; background:#F0F2F6;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 with tabs[0]:
@@ -1349,7 +1578,7 @@ with tabs[4]:
 with tabs[5]:
     st.subheader("多公司、多期间数据集成")
     st.caption(
-        "标准窄表与外部宽表是互斥数据源；确认后将以本次预览结果作为后续 "
+        "两种接入方式互斥；确认后将以本次预览结果作为后续 "
         f"STEP6-STEP8 的 {active_profile.profile_id} 集成数据。"
     )
     integration_mode = st.segmented_control(
@@ -1402,10 +1631,15 @@ with tabs[5]:
                         "数据类型": "标准窄表",
                         "记录数": len(standardized),
                     })
-                st.session_state.integration_preview = (
+                integration_preview = (
                     pd.concat(frames, ignore_index=True)
                     if frames
                     else pd.DataFrame(columns=STANDARD_COLUMNS)
+                )
+                st.session_state.integration_preview = (
+                    add_missing_derived_metrics(integration_preview)
+                    if active_profile.profile_id == "LIFE_SOLVENCY"
+                    else integration_preview
                 )
                 st.session_state.integration_sheet_summary = pd.DataFrame(summaries)
                 st.session_state.integration_mapping_summary = pd.DataFrame()
@@ -1454,8 +1688,11 @@ with tabs[5]:
                     )
                     for upload in uploads
                 ]
-                st.session_state.integration_preview = pd.concat(
+                integration_preview = pd.concat(
                     [item.data for item in converted], ignore_index=True
+                )
+                st.session_state.integration_preview = add_missing_derived_metrics(
+                    integration_preview
                 )
                 st.session_state.integration_sheet_summary = pd.concat(
                     [item.sheet_summary for item in converted], ignore_index=True
@@ -1516,10 +1753,14 @@ with tabs[5]:
                 )
         st.caption(
             f"转换后共 {len(preview):,} 条窄表记录。确认后将替换当前集成数据，"
-            "不与另一接入方式并行合并，也不额外去重。"
+            "不与其他接入方式并行合并。"
         )
         st.dataframe(preview.head(1000), width="stretch", hide_index=True)
-        if st.button("确认采用该数据集", type="primary", key="confirm_integrated_data"):
+        if st.button(
+            "确认采用该数据集",
+            type="primary",
+            key="confirm_integrated_data",
+        ):
             st.session_state.integrated_data = preview.copy()
             st.success("已更新集成数据，STEP6-STEP8 将使用本次确认的数据集。")
     if not st.session_state.integrated_data.empty:
@@ -1531,30 +1772,443 @@ with tabs[5]:
             "偿付能力行业集成数据.xlsx",
         )
 
+raw_analysis_source = (
+    st.session_state.integrated_data
+    if not st.session_state.integrated_data.empty
+    else st.session_state.standard_data
+)
+shared_analysis_source, _ = prepare_visualization_source(
+    raw_analysis_source,
+    active_profile.profile_id,
+)
+
 
 with tabs[6]:
     st.subheader("自定义偿付能力对标分析")
-    source = st.session_state.integrated_data if not st.session_state.integrated_data.empty else st.session_state.standard_data
-    if source.empty:
-        st.info("请先完成标准化或数据集成。")
+    source_mode = st.radio(
+        "数据源选择",
+        ["直接引用集成后的数据", "上传集成表 Excel"],
+        horizontal=True,
+        key="step6_data_source_choice",
+    )
+
+    source = pd.DataFrame(columns=STANDARD_COLUMNS)
+    source_label = ""
+    skipped_profiles: tuple[str, ...] = ()
+    if source_mode == "直接引用集成后的数据":
+        source, skipped_profiles = prepare_visualization_source(
+            st.session_state.integrated_data,
+            active_profile.profile_id,
+        )
+        source_label = "STEP5 已确认集成数据"
     else:
-        metrics = source[["指标编码", "指标名称"]].drop_duplicates().sort_values("指标名称")
-        selected_metric = st.selectbox("选择指标", metrics["指标名称"].tolist(), key="custom_metric")
-        code = metrics.loc[metrics["指标名称"] == selected_metric, "指标编码"].iloc[0]
-        view = source[source["指标编码"] == code].copy()
-        view["数值"] = pd.to_numeric(view["数值"], errors="coerce")
-        view = view.dropna(subset=["数值"])
-        if view.empty:
-            st.warning("该指标没有可绘制的数值。")
-        else:
-            import plotly.express as px
-            fig = px.line(view.sort_values("报告期"), x="报告期", y="数值", color="公司", markers=True, facet_col="期间口径" if view["期间口径"].nunique() <= 3 else None)
-            st.plotly_chart(fig, use_container_width=True)
+        step6_upload = st.file_uploader(
+            "上传行业集成目标表",
+            type=["xlsx"],
+            key=f"step6_integrated_upload_{active_profile.profile_id}",
+            help="优先读取“标准数据”工作表；至少应包含公司、指标编码、指标名称和数值字段。",
+        )
+        if step6_upload is not None:
+            try:
+                source, skipped_profiles = read_step6_analysis_workbook(
+                    step6_upload.getvalue(),
+                    step6_upload.name,
+                    active_profile.profile_id,
+                )
+                source_label = step6_upload.name
+                st.success(f"已读取 {len(source):,} 条可分析记录。")
+            except Exception as exc:
+                st.error(f"集成表读取失败：{exc}")
 
+    if skipped_profiles:
+        st.warning(
+            "已跳过不属于当前报告 Profile 的记录："
+            + "、".join(skipped_profiles)
+        )
 
-analysis_source = st.session_state.integrated_data if not st.session_state.integrated_data.empty else st.session_state.standard_data
+    navigation_source = report_scope_frame(
+        visualization_metric_frame(source),
+        COMPANY_REPORT,
+    )
+    available_metric_codes = navigation_metric_codes(navigation_source)
+    industry_navigation_source = report_scope_frame(
+        visualization_metric_frame(source),
+        INDUSTRY_REPORT,
+    )
+    industry_available_metric_codes = navigation_metric_codes(
+        industry_navigation_source
+    )
+
+    if analysis_tabs_active:
+        with st.sidebar:
+            render_report_navigation(
+                title="公司报告导航",
+                container_key="kpmg_company_nav_title",
+                state_prefix="company_nav",
+                available_codes=available_metric_codes,
+                print_key=f"company_report_print_{active_profile.profile_id}",
+            )
+            render_report_navigation(
+                title="行业分析导航",
+                container_key="kpmg_industry_nav_title",
+                state_prefix="industry_nav",
+                available_codes=industry_available_metric_codes,
+                print_key=f"industry_report_print_{active_profile.profile_id}",
+                industry=True,
+            )
+
+            st.markdown("### 补充数据")
+            financing_upload = st.file_uploader(
+                "上传重大融资信息 Excel",
+                type=["xlsx"],
+                key=f"major_financing_upload_{active_profile.profile_id}",
+                help="应包含季度、公司名称、增资/发债及综合充足率变动字段。",
+            )
+            if financing_upload is not None:
+                try:
+                    st.session_state.major_financing_data = read_major_financing_upload(
+                        financing_upload.getvalue(),
+                        financing_upload.name,
+                    )
+                    st.caption(
+                        f"已读取 {len(st.session_state.major_financing_data):,} 条融资事件。"
+                    )
+                except Exception as exc:
+                    st.error(f"重大融资信息读取失败：{exc}")
+
+    if navigation_source.empty:
+        if not source.empty:
+            st.info("当前数据仅包含校验类记录；这些记录保留在 STEP5，但不会进入可视化指标。")
+        elif source_mode == "直接引用集成后的数据":
+            st.info("STEP5 尚无已确认的集成数据，请先完成集成，或切换为上传集成表 Excel。")
+        elif source_label == "":
+            st.info("请上传一份标准窄表格式的集成 Excel。")
+    else:
+        render_kpmg_palette()
+        selected_level_one = st.session_state.get("company_nav_level_one", "")
+        selected_level_two = st.session_state.get("company_nav_level_two", "全部")
+        module_frame = navigation_source.copy()
+        if selected_level_one and selected_level_one != PRINT_ALL_LABEL:
+            module_frame = module_frame[
+                module_frame["一级模块"].astype(str).str.strip().eq(selected_level_one)
+            ]
+            if selected_level_two and selected_level_two != "全部":
+                module_frame = module_frame[
+                    module_frame["二级模块"].astype(str).str.strip().eq(selected_level_two)
+                ]
+        if module_frame.empty and not navigation_source.empty:
+            st.info("当前一级/二级模块下没有可视化指标，请在侧边栏选择其他模块。")
+        if not module_frame.empty:
+            with st.expander(
+                "核心配置面板",
+                expanded=True,
+                icon=":material/tune:",
+            ):
+                settings_col, layout_col, unit_col = st.columns([1.5, 1, 1])
+                metric_labels, metric_lookup = metric_options(module_frame)
+                keep_valid_widget_state("step6_metric", metric_labels)
+                with settings_col:
+                    chart_type = st.selectbox(
+                        "图表类型",
+                        CHART_TYPES,
+                        key="step6_chart_type",
+                    )
+                    selected_metric = st.selectbox(
+                        "选择显示指标",
+                        metric_labels,
+                        key="step6_metric",
+                        disabled=not metric_labels,
+                        placeholder="暂无可用指标",
+                    ) if metric_labels else ""
+
+                    peer_group_options = nonblank_values(module_frame, "同业分类")
+                    company_type_filter_options = [
+                        NO_COMPANY_TYPE_FILTER,
+                        *peer_group_options,
+                    ]
+                    keep_valid_widget_state(
+                        "step6_company_type_quick_select",
+                        company_type_filter_options,
+                    )
+                    selected_company_type = st.selectbox(
+                        "按公司类型快速选择",
+                        company_type_filter_options,
+                        key="step6_company_type_quick_select",
+                    )
+                    all_company_options = companies_for_quick_selection(
+                        module_frame,
+                    )
+                    selected_type_companies = companies_for_quick_selection(
+                        module_frame,
+                        selected_company_type,
+                    )
+                    previous_company_type = st.session_state.get(
+                        "_step6_previous_company_type_quick_select"
+                    )
+                    if previous_company_type != selected_company_type:
+                        if selected_company_type == NO_COMPANY_TYPE_FILTER:
+                            current_companies = st.session_state.get("step6_companies", [])
+                            retained_companies = [
+                                company
+                                for company in current_companies
+                                if company in all_company_options
+                            ]
+                            st.session_state.step6_companies = (
+                                retained_companies or all_company_options[:2]
+                            )
+                        else:
+                            st.session_state.step6_companies = selected_type_companies
+                        st.session_state._step6_previous_company_type_quick_select = (
+                            selected_company_type
+                        )
+                    elif "step6_companies" not in st.session_state:
+                        st.session_state.step6_companies = all_company_options[:2]
+                    keep_valid_widget_state(
+                        "step6_companies",
+                        all_company_options,
+                        multiple=True,
+                    )
+                    selected_comparison_companies = st.multiselect(
+                        "选择对比公司",
+                        all_company_options,
+                        key="step6_companies",
+                        placeholder="选择一家或多家公司",
+                    )
+
+                comparison_frame = (
+                    module_frame[
+                        module_frame["公司"].isin(selected_comparison_companies)
+                    ].copy()
+                    if selected_comparison_companies
+                    else module_frame.iloc[0:0].copy()
+                )
+                with layout_col:
+                    layout_mode = st.radio(
+                        "布局视角",
+                        ["以公司为横轴", "以报告期为横轴"],
+                        key="step6_layout_mode",
+                    )
+                    decimals = st.number_input(
+                        "小数位数",
+                        min_value=0,
+                        max_value=4,
+                        value=2,
+                        step=1,
+                        key="step6_decimals",
+                    )
+                    show_labels = st.toggle(
+                        "显示数据标签",
+                        value=True,
+                        key="step6_show_labels",
+                    )
+
+                selected_metric_code = metric_lookup.get(selected_metric, "")
+                metric_preview = filter_analysis_frame(
+                    module_frame,
+                    metric_code=selected_metric_code,
+                )
+                preview_units = nonblank_values(metric_preview, "单位")
+                unit_options = ["原始数值"]
+                if any(unit in {"元", "万元", "亿元"} for unit in preview_units):
+                    unit_options.extend(["亿元", "十亿元"])
+                if any(unit == "倍" for unit in preview_units):
+                    unit_options.append("百分比(%)")
+                keep_valid_widget_state("step6_unit_mode", unit_options)
+                with unit_col:
+                    unit_mode = st.selectbox(
+                        "数值单位换算",
+                        unit_options,
+                        key="step6_unit_mode",
+                    )
+                    y_axis_title = st.text_input(
+                        "Y轴单位显示修改",
+                        value="",
+                        placeholder="留空则使用指标单位",
+                        key="step6_y_axis_title",
+                    )
+                    transparent = st.toggle(
+                        "开启透明背景模式",
+                        value=False,
+                        key="step6_transparent",
+                    )
+                    show_average = st.toggle(
+                        "平均值线",
+                        value=False,
+                        key="step6_show_average",
+                    )
+                    average_color = (
+                        st.color_picker(
+                            "基准线颜色",
+                            value="#ED2124",
+                            key="step6_average_color",
+                        )
+                        if show_average
+                        else "#ED2124"
+                    )
+
+                period_options = sort_report_periods(comparison_frame["报告期"].tolist())
+                keep_valid_widget_state(
+                    "step6_periods",
+                    period_options,
+                    multiple=True,
+                )
+                time_col, scope_col = st.columns([2, 1])
+                with time_col:
+                    selected_periods = st.multiselect(
+                        "对比时间",
+                        period_options,
+                        default=(
+                            default_periods(period_options)
+                            if "step6_periods" not in st.session_state
+                            else None
+                        ),
+                        key="step6_periods",
+                        placeholder="选择报告期",
+                    )
+
+                period_frame = (
+                    comparison_frame[
+                        comparison_frame["报告期"].isin(selected_periods)
+                    ].copy()
+                    if selected_periods
+                    else comparison_frame.iloc[0:0].copy()
+                )
+                scope_options = nonblank_values(period_frame, "期间口径")
+                keep_valid_widget_state("step6_period_scope", scope_options)
+                with scope_col:
+                    period_scope = st.selectbox(
+                        "期间口径",
+                        scope_options,
+                        key="step6_period_scope",
+                        disabled=not scope_options,
+                        placeholder="暂无期间口径",
+                    ) if scope_options else ""
+                scoped_frame = filter_analysis_frame(
+                    period_frame,
+                    period_scope=period_scope,
+                )
+
+            chart_frame = filter_analysis_frame(
+                scoped_frame,
+                metric_code=selected_metric_code,
+            )
+            if chart_frame.empty:
+                st.info("请至少选择一个公司、一个报告期和一个可用指标。")
+            else:
+                chart_frame = chart_frame.copy()
+                units = nonblank_values(chart_frame, "单位")
+                chart_plot_frame = chart_frame.copy()
+                if unit_mode in {"亿元", "十亿元"}:
+                    target_yuan = 100_000_000 if unit_mode == "亿元" else 1_000_000_000
+                    source_yuan = {"元": 1, "万元": 10_000, "亿元": 100_000_000}
+                    chart_plot_frame["数值"] = chart_plot_frame.apply(
+                        lambda row: (
+                            pd.to_numeric(pd.Series([row["数值"]]), errors="coerce").iloc[0]
+                            * source_yuan.get(str(row.get("单位", "")).strip(), target_yuan)
+                            / target_yuan
+                        ),
+                        axis=1,
+                    )
+                    chart_plot_frame["单位"] = unit_mode
+                elif unit_mode == "百分比(%)":
+                    multiple_mask = chart_plot_frame["单位"].astype(str).str.strip().eq("倍")
+                    chart_plot_frame.loc[multiple_mask, "数值"] = (
+                        pd.to_numeric(
+                            chart_plot_frame.loc[multiple_mask, "数值"],
+                            errors="coerce",
+                        )
+                        * 100
+                    )
+                    chart_plot_frame.loc[multiple_mask, "单位"] = "%"
+
+                duplicate_columns = ["公司", "报告期", "指标编码", "期间口径"]
+                duplicate_count = int(chart_frame.duplicated(duplicate_columns, keep=False).sum())
+                if duplicate_count:
+                    st.warning(
+                        f"当前筛选结果中有 {duplicate_count:,} 条重复粒度记录，"
+                        "图表将全部保留展示，请检查集成数据。"
+                    )
+                if len(units) > 1:
+                    st.warning("同一指标存在多个单位：" + "、".join(units))
+
+                st.markdown("#### :material/palette: 自定义图例标签与颜色")
+                legend_items = (
+                    sort_report_periods(chart_plot_frame["报告期"].tolist())
+                    if layout_mode == "以公司为横轴"
+                    else nonblank_values(chart_plot_frame, "公司")
+                )
+                legend_label_map: dict[str, str] = {}
+                legend_color_map: dict[str, str] = {}
+                legend_columns = st.columns(min(4, max(1, len(legend_items))))
+                for index, item in enumerate(legend_items):
+                    with legend_columns[index % len(legend_columns)]:
+                        st.caption(f"原始值：{item}")
+                        legend_label_map[item] = st.text_input(
+                            "显示名称",
+                            value=item,
+                            key=f"step6_legend_label_{layout_mode}_{index}",
+                        )
+                        legend_color_map[item] = st.color_picker(
+                            "选择颜色",
+                            value=KPMG_DEFAULT_COLORS[index % len(KPMG_DEFAULT_COLORS)],
+                            key=f"step6_legend_color_{layout_mode}_{index}",
+                        )
+
+                metric_name = str(chart_frame.iloc[0]["指标名称"])
+                st.markdown(f"#### {metric_name}")
+                st.caption(
+                    f"数据源：{source_label or '当前上传文件'}　｜　"
+                    f"对比公司：{len(selected_comparison_companies)} 家　｜　"
+                    f"对比期间：{chart_frame['报告期'].nunique()} 个　｜　"
+                    f"记录数：{len(chart_frame)} 条"
+                )
+                chart = build_comparison_chart(
+                    chart_plot_frame,
+                    chart_type,
+                    sort_report_periods(chart_frame["报告期"].tolist()),
+                    show_labels=show_labels,
+                    decimals=int(decimals),
+                    layout_mode=layout_mode,
+                    legend_label_map=legend_label_map,
+                    legend_color_map=legend_color_map,
+                    y_axis_title=y_axis_title,
+                    transparent=transparent,
+                    show_average=show_average,
+                    average_color=average_color,
+                )
+                st.altair_chart(chart, width="stretch")
+
+                with st.expander("查看图表明细数据"):
+                    display_columns = [
+                        "公司",
+                        "公司类型",
+                        "同业分类",
+                        "报告期",
+                        "一级模块",
+                        "二级模块",
+                        "指标编码",
+                        "指标名称",
+                        "期间口径",
+                        "数值",
+                        "单位",
+                        "来源类型",
+                        "来源文件",
+                        "来源工作表",
+                        "计算逻辑",
+                    ]
+                    st.dataframe(
+                        chart_frame[display_columns].sort_values(["报告期", "公司"]),
+                        width="stretch",
+                        hide_index=True,
+                    )
+
 with tabs[7]:
-    show_step_7_solvency(analysis_source)
+    if active_workflow_tab == WORKFLOW_TAB_LABELS[7]:
+        show_step_7_solvency(shared_analysis_source)
 with tabs[8]:
-    show_step_8_solvency(analysis_source)
+    if active_workflow_tab == WORKFLOW_TAB_LABELS[8]:
+        show_step_8_solvency(
+            shared_analysis_source,
+            st.session_state.major_financing_data,
+        )
 

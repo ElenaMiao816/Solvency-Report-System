@@ -70,6 +70,15 @@ DERIVED_METRICS = (
         dependencies=("QUANT_RISK_CAPITAL", "INSURANCE_RISK_CAPITAL", "NON_LIFE_INSURANCE_RISK_CAPITAL", "MARKET_RISK_CAPITAL", "CREDIT_RISK_CAPITAL", "QUANT_RISK_DIVERSIFICATION_EFFECT", "CONTRACT_LOSS_ABSORPTION_EFFECT"),
     ),
     MetricDefinition("ACTUAL_CAPITAL_TO_RECOGNIZED_ASSETS", "实际资本/认可资产", "派生指标", "资本效率", "倍", "比率", "计算", formula="实际资本/认可资产", dependencies=("ACTUAL_CAPITAL", "RECOGNIZED_ASSETS")),
+    MetricDefinition("CORE_T1_TO_ACTUAL_CAPITAL", "核心一级资本占比", "实际资本", "核心资本占比分布", "倍", "比率", "计算", formula="核心一级资本/实际资本", dependencies=("CORE_T1_CAPITAL", "ACTUAL_CAPITAL")),
+    MetricDefinition("CORE_T2_TO_ACTUAL_CAPITAL", "核心二级资本占比", "实际资本", "核心资本占比分布", "倍", "比率", "计算", formula="核心二级资本/实际资本", dependencies=("CORE_T2_CAPITAL", "ACTUAL_CAPITAL")),
+    MetricDefinition("ANC_T1_TO_ACTUAL_CAPITAL", "附属一级资本占比", "实际资本", "附属资本占比分布", "倍", "比率", "计算", formula="附属一级资本/实际资本", dependencies=("ANC_T1_CAPITAL", "ACTUAL_CAPITAL")),
+    MetricDefinition("ANC_T2_TO_ACTUAL_CAPITAL", "附属二级资本占比", "实际资本", "附属资本占比分布", "倍", "比率", "计算", formula="附属二级资本/实际资本", dependencies=("ANC_T2_CAPITAL", "ACTUAL_CAPITAL")),
+    MetricDefinition(
+        "POLICY_SURPLUS_CORE_TO_CORE_CAPITAL", "计入核心资本的保单未来盈余/核心资本的比例", "实际资本", "保单未来盈余", "倍", "比率", "计算",
+        formula="(计入核心一级资本的保单未来盈余+计入核心二级资本的保单未来盈余)/(核心一级资本+核心二级资本)",
+        dependencies=("POLICY_SURPLUS_CORE_T1", "POLICY_SURPLUS_CORE_T2", "CORE_T1_CAPITAL", "CORE_T2_CAPITAL"),
+    ),
     MetricDefinition("MINIMUM_CAPITAL_TO_RECOGNIZED_LIABILITIES", "最低资本/认可负债", "派生指标", "资本效率", "倍", "比率", "计算", formula="最低资本/认可负债", dependencies=("MINIMUM_CAPITAL", "RECOGNIZED_LIABILITIES")),
     MetricDefinition(
         "POLICY_SURPLUS_TO_INSURANCE_LIABILITIES", "保单未来盈余/保险合同负债", "派生指标", "保单未来盈余", "倍", "比率", "计算",
@@ -87,6 +96,12 @@ DERIVED_METRICS = (
     ),
     MetricDefinition("LIFE_INSURANCE_RISK_TO_LIABILITIES", "保险风险（寿）/认可负债", "派生指标", "风险结构", "倍", "比率", "计算", formula="寿险业务保险风险最低资本合计/认可负债", dependencies=("INSURANCE_RISK_CAPITAL", "RECOGNIZED_LIABILITIES")),
     MetricDefinition("NON_LIFE_INSURANCE_RISK_TO_LIABILITIES", "保险风险（非寿）/认可负债", "派生指标", "风险结构", "倍", "比率", "计算", formula="非寿险业务保险风险最低资本合计/认可负债", dependencies=("NON_LIFE_INSURANCE_RISK_CAPITAL", "RECOGNIZED_LIABILITIES")),
+    MetricDefinition("LIFE_INSURANCE_RISK_TO_QUANT_CAPITAL", "寿险业务保险风险最低资本占比", "最低资本", "保险风险最低资本情况", "倍", "比率", "计算", formula="寿险业务保险风险最低资本合计/量化风险最低资本", dependencies=("INSURANCE_RISK_CAPITAL", "QUANT_RISK_CAPITAL")),
+    MetricDefinition("NON_LIFE_INSURANCE_RISK_TO_QUANT_CAPITAL", "非寿险业务保险风险最低资本占比", "最低资本", "保险风险最低资本情况", "倍", "比率", "计算", formula="非寿险业务保险风险最低资本合计/量化风险最低资本", dependencies=("NON_LIFE_INSURANCE_RISK_CAPITAL", "QUANT_RISK_CAPITAL")),
+    MetricDefinition("MARKET_RISK_TO_QUANT_CAPITAL", "市场风险最低资本占比", "最低资本", "市场和信用风险最低资本情况", "倍", "比率", "计算", formula="市场风险最低资本合计/量化风险最低资本", dependencies=("MARKET_RISK_CAPITAL", "QUANT_RISK_CAPITAL")),
+    MetricDefinition("CREDIT_RISK_TO_QUANT_CAPITAL", "信用风险最低资本占比", "最低资本", "市场和信用风险最低资本情况", "倍", "比率", "计算", formula="信用风险最低资本合计/量化风险最低资本", dependencies=("CREDIT_RISK_CAPITAL", "QUANT_RISK_CAPITAL")),
+    MetricDefinition("DIVERSIFICATION_EFFECT_TO_QUANT_CAPITAL", "风险分散效应最低资本占比", "最低资本", "风险分散效应和损失吸收", "倍", "比率", "计算", formula="量化风险分散效应/量化风险最低资本", dependencies=("QUANT_RISK_DIVERSIFICATION_EFFECT", "QUANT_RISK_CAPITAL")),
+    MetricDefinition("LOSS_ABSORPTION_TO_QUANT_CAPITAL", "损失吸收效应最低资本占比", "最低资本", "风险分散效应和损失吸收", "倍", "比率", "计算", formula="特定类别保险合同损失吸收效应/量化风险最低资本", dependencies=("CONTRACT_LOSS_ABSORPTION_EFFECT", "QUANT_RISK_CAPITAL")),
     MetricDefinition("MARKET_RISK_TO_ASSETS", "市场风险/认可资产", "派生指标", "风险结构", "倍", "比率", "计算", formula="市场风险最低资本合计/认可资产", dependencies=("MARKET_RISK_CAPITAL", "RECOGNIZED_ASSETS")),
     MetricDefinition("CREDIT_RISK_TO_ASSETS", "信用风险/认可资产", "派生指标", "风险结构", "倍", "比率", "计算", formula="信用风险最低资本合计/认可资产", dependencies=("CREDIT_RISK_CAPITAL", "RECOGNIZED_ASSETS")),
     MetricDefinition(

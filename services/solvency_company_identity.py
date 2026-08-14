@@ -108,6 +108,20 @@ def apply_company_identities(
     if result.empty or "公司" not in result.columns:
         return result
     for index, row in result.iterrows():
+        company = str(row.get("公司", "") or "").strip()
+        company_type = str(row.get("公司类型", "") or "").strip()
+        company_code = str(row.get("公司统一编码", "") or "").strip()
+        if (
+            company == "行业合计"
+            or company_type == "行业合计"
+            or company_code.startswith("INDUSTRY_")
+        ):
+            result.at[index, "原始公司名称"] = "行业合计"
+            result.at[index, "标准公司名称"] = "行业合计"
+            result.at[index, "公司"] = "行业合计"
+            result.at[index, "公司统一编码"] = company_code or "INDUSTRY_TOTAL"
+            result.at[index, "公司类型"] = "行业合计"
+            continue
         original = str(row.get("原始公司名称", "") or "").strip() or row.get("公司", "")
         identity = resolve_company_identity(
             original,

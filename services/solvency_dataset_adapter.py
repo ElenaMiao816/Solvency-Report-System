@@ -12,7 +12,6 @@ import numpy as np
 import pandas as pd
 
 from .solvency_metric_registry import (
-    CUSTOM_METRICS_BY_CODE,
     DERIVED_METRICS,
     INDUSTRY_METRICS_BY_SOURCE_CODE,
 )
@@ -158,6 +157,10 @@ def calculate_derived_values(values: dict[str, Any]) -> dict[str, Any]:
         None if quant_capital is None or quant_before_factor is None else quant_capital - quant_before_factor
     )
     result["ACTUAL_CAPITAL_TO_RECOGNIZED_ASSETS"] = _safe_divide(get("ACTUAL_CAPITAL"), get("RECOGNIZED_ASSETS"))
+    result["CORE_T1_TO_ACTUAL_CAPITAL"] = _safe_divide(get("CORE_T1_CAPITAL"), get("ACTUAL_CAPITAL"))
+    result["CORE_T2_TO_ACTUAL_CAPITAL"] = _safe_divide(get("CORE_T2_CAPITAL"), get("ACTUAL_CAPITAL"))
+    result["ANC_T1_TO_ACTUAL_CAPITAL"] = _safe_divide(get("ANC_T1_CAPITAL"), get("ACTUAL_CAPITAL"))
+    result["ANC_T2_TO_ACTUAL_CAPITAL"] = _safe_divide(get("ANC_T2_CAPITAL"), get("ACTUAL_CAPITAL"))
     result["MINIMUM_CAPITAL_TO_RECOGNIZED_LIABILITIES"] = _safe_divide(get("MINIMUM_CAPITAL"), get("RECOGNIZED_LIABILITIES"))
     liabilities = _safe_sum(values, ("INSURANCE_CONTRACT_LIABILITY", "SEPARATE_ACCOUNT_LIABILITY"))
     result["POLICY_SURPLUS_TO_INSURANCE_LIABILITIES"] = _safe_divide(all_policy_surplus, liabilities)
@@ -172,12 +175,19 @@ def calculate_derived_values(values: dict[str, Any]) -> dict[str, Any]:
     result["CREDIT_RISK_TO_ASSETS"] = _safe_divide(get("CREDIT_RISK_CAPITAL"), get("RECOGNIZED_ASSETS"))
     core_capital = _safe_sum(values, ("CORE_T1_CAPITAL", "CORE_T2_CAPITAL"))
     result["CORE_CAPITAL_TO_REGISTERED_CAPITAL"] = _safe_divide(core_capital, get("REGISTERED_CAPITAL"))
+    result["POLICY_SURPLUS_CORE_TO_CORE_CAPITAL"] = _safe_divide(core_policy_surplus, core_capital)
     result["CORE_T1_POLICY_SURPLUS_SHARE"] = _safe_divide(get("POLICY_SURPLUS_CORE_T1"), get("CORE_T1_CAPITAL"))
     result["ANC_T1_POLICY_SURPLUS_SHARE"] = _safe_divide(get("POLICY_SURPLUS_ANC_T1"), get("ANC_T1_CAPITAL"))
     result["INTEREST_RATE_RISK_TO_ASSETS"] = _safe_divide(get("INTEREST_RATE_RISK_CAPITAL"), get("RECOGNIZED_ASSETS"))
     result["EQUITY_RISK_TO_ASSETS"] = _safe_divide(get("EQUITY_RISK_CAPITAL"), get("RECOGNIZED_ASSETS"))
     result["SPREAD_RISK_TO_ASSETS"] = _safe_divide(get("SPREAD_RISK_CAPITAL"), get("RECOGNIZED_ASSETS"))
     result["COUNTERPARTY_RISK_TO_ASSETS"] = _safe_divide(get("COUNTERPARTY_RISK_CAPITAL"), get("RECOGNIZED_ASSETS"))
+    result["LIFE_INSURANCE_RISK_TO_QUANT_CAPITAL"] = _safe_divide(get("INSURANCE_RISK_CAPITAL"), quant_capital)
+    result["NON_LIFE_INSURANCE_RISK_TO_QUANT_CAPITAL"] = _safe_divide(get("NON_LIFE_INSURANCE_RISK_CAPITAL"), quant_capital)
+    result["MARKET_RISK_TO_QUANT_CAPITAL"] = _safe_divide(get("MARKET_RISK_CAPITAL"), quant_capital)
+    result["CREDIT_RISK_TO_QUANT_CAPITAL"] = _safe_divide(get("CREDIT_RISK_CAPITAL"), quant_capital)
+    result["DIVERSIFICATION_EFFECT_TO_QUANT_CAPITAL"] = _safe_divide(get("QUANT_RISK_DIVERSIFICATION_EFFECT"), quant_capital)
+    result["LOSS_ABSORPTION_TO_QUANT_CAPITAL"] = _safe_divide(get("CONTRACT_LOSS_ABSORPTION_EFFECT"), quant_capital)
     result["TOTAL_ASSETS_TO_REGISTERED_CAPITAL"] = _safe_divide(get("TOTAL_ASSETS"), get("REGISTERED_CAPITAL"))
     return result
 
@@ -401,6 +411,50 @@ def append_derived_metrics(frame: pd.DataFrame) -> pd.DataFrame:
         [standardize_uploaded_frame(source), pd.DataFrame(derived_records, columns=STANDARD_COLUMNS)],
         ignore_index=True,
     )
+
+
+def add_missing_derived_metrics(frame: pd.DataFrame) -> pd.DataFrame:
+    """Fill calculable derived metrics without replacing values supplied by the user.
+
+    ``append_derived_metrics`` is intentionally authoritative for STEP3: it removes
+    existing derived rows and recalculates them.  Integrated workbooks need a gentler
+    policy because a reviewed external data set may already contain selected ratios.
+    This helper keeps every supplied row and appends only derived metric keys that are
+    absent and can be calculated from the available base indicators.
+    """
+    source = apply_company_identities(standardize_uploaded_frame(frame))
+    if source.empty:
+        return source
+
+    derived_codes = {item.code for item in DERIVED_METRICS}
+    calculated = append_derived_metrics(source)
+    candidates = calculated[calculated["指标编码"].isin(derived_codes)].copy()
+    if candidates.empty:
+        return source
+
+    existing = source[source["指标编码"].isin(derived_codes)].copy()
+    key_columns = [
+        "报告类型",
+        "公司统一编码",
+        "报告年度",
+        "报告季度",
+        "报告期",
+        "_期间组",
+        "指标编码",
+    ]
+
+    def row_keys(rows: pd.DataFrame) -> pd.Series:
+        keyed = rows.copy()
+        keyed["_期间组"] = keyed["期间口径"].map(canonical_period_scope)
+        values = keyed[key_columns].fillna("").astype(str)
+        return values.apply(tuple, axis=1)
+
+    existing_keys = set(row_keys(existing).tolist()) if not existing.empty else set()
+    missing_mask = ~row_keys(candidates).isin(existing_keys)
+    additions = candidates.loc[missing_mask]
+    if additions.empty:
+        return source
+    return pd.concat([source, additions], ignore_index=True)
 
 
 def _metric_lookup(taxonomy: pd.DataFrame) -> dict[str, dict]:

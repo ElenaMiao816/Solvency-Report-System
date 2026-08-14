@@ -11,6 +11,7 @@ import pandas as pd
 
 from .solvency_table_extractor import ExtractedTable
 from .solvency_company_identity import apply_company_identities, resolve_company_identity
+from .solvency_navigation import apply_navigation_labels
 
 
 STANDARD_COLUMNS = [
@@ -482,7 +483,7 @@ def normalize_tables(
                     "导入批次": metadata.get("导入批次", ""),
                     "计算逻辑": "",
                 })
-    return pd.DataFrame(records, columns=STANDARD_COLUMNS)
+    return apply_navigation_labels(pd.DataFrame(records, columns=STANDARD_COLUMNS))
 
 
 def standardize_uploaded_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -490,7 +491,7 @@ def standardize_uploaded_frame(frame: pd.DataFrame) -> pd.DataFrame:
     for column in STANDARD_COLUMNS:
         if column not in result.columns:
             result[column] = ""
-    return result[STANDARD_COLUMNS]
+    return apply_navigation_labels(result[STANDARD_COLUMNS])
 
 
 def upgrade_standard_frame(frame: pd.DataFrame) -> pd.DataFrame:
