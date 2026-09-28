@@ -211,6 +211,22 @@ TABLE_ITEM_BOUNDARIES = {
             },
         ),
     },
+    "RECOGNIZED_ASSETS": {
+        "scope_name": "认可资产",
+        "variant_note": (
+            "从现金及流动性管理工具等资产明细开始，至认可资产合计（或合计）结束；"
+            "账面价值与非认可价值仅用于核对，主要指标取认可价值。"
+        ),
+        "start_items": (
+            "现金及流动性管理工具",
+            "投资资产",
+            "再保险资产",
+            "认可资产",
+        ),
+        "end_items": ("认可资产合计", "认可资产总额", "合计"),
+        "required_items": ("现金及流动性管理工具", "投资资产", "再保险资产"),
+        "exclude_items": ("认可负债表", "准备金负债", "金融负债"),
+    },
 }
 TABLE_CANONICAL_HEADERS = {
     "SOLVENCY_MAIN": (
@@ -221,6 +237,7 @@ TABLE_CANONICAL_HEADERS = {
     ),
     "OPERATING_METRICS": ("指标名称", "本季度数", "本年度累计数"),
     "ACTUAL_CAPITAL": ("行次", "项目", "期末数", "期初数"),
+    "RECOGNIZED_ASSETS": ("行次", "项目", "期末数", "期初数"),
     "THREE_YEAR_INVESTMENT_RETURN": ("项目", "数值"),
     "MINIMUM_CAPITAL": ("行次", "项目", "期末数", "期初数"),
 }
@@ -557,7 +574,7 @@ def enforce_output_boundaries(
             raise TableBoundaryError(f"未找到顺序闭合的首尾项目：{expected}。")
         return rows, ""
 
-    header = rows[0] if start_index > 0 else None
+    header_rows = rows[:start_index] if start_index > 0 else []
     bounded = rows[start_index:end_index + 1]
     bounded = [row for row in bounded if not _is_pagination_row(row)]
     excluded = tuple(selected_boundary.get("exclude_items", ()))
@@ -591,11 +608,14 @@ def enforce_output_boundaries(
             selected.append(row)
         bounded = selected
 
-    if header is not None and _is_generic_header(header):
-        width = max(len(header), max((len(row) for row in bounded), default=0))
-        header = _canonical_header(table_id, width, table_config)
-    if header is not None and header not in bounded:
-        bounded = [header, *bounded]
+    if header_rows and _is_generic_header(header_rows[0]):
+        width = max(
+            max((len(row) for row in header_rows), default=0),
+            max((len(row) for row in bounded), default=0),
+        )
+        header_rows = [_canonical_header(table_id, width, table_config)]
+    if header_rows and header_rows[0] not in bounded:
+        bounded = [*header_rows, *bounded]
     return bounded, (
         "已按首尾项目边界截取，补全标准表头并过滤独立页码行；"
         f"采用版式：{selected_boundary.get('name', '标准版式')}；"

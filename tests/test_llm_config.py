@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from services.llm_config import model_request_parameters, normalize_model_id
+from services.llm_config import (
+    model_request_parameters,
+    normalize_model_id,
+    vlm_request_parameters,
+)
 from services.solvency_hybrid_pipeline import _call_chat
 
 
@@ -30,6 +34,18 @@ class LLMConfigTests(unittest.TestCase):
         )
 
     def test_omits_temperature_for_moonshot_kimi_k2_6(self):
+        self.assertEqual(
+            model_request_parameters("https://api.moonshot.cn/v1", "kimi-k2.6"),
+            {},
+        )
+
+    def test_vlm_requests_disable_thinking_for_moonshot_kimi_k2_6(self):
+        self.assertEqual(
+            vlm_request_parameters("https://api.moonshot.cn/v1", "kimi-k2.6"),
+            {"thinking": {"type": "disabled"}},
+        )
+
+    def test_non_vlm_chat_parameters_remain_unchanged(self):
         self.assertEqual(
             model_request_parameters("https://api.moonshot.cn/v1", "kimi-k2.6"),
             {},

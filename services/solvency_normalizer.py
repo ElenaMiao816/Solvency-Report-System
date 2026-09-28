@@ -4,14 +4,21 @@ import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 import numpy as np
 import pandas as pd
 
 from .solvency_table_extractor import ExtractedTable
-from .solvency_company_identity import apply_company_identities, resolve_company_identity
+from .solvency_company_identity import (
+    apply_company_identities,
+    resolve_company_identity,
+    resolve_peer_group,
+)
+from .solvency_disclosure_normalizer import normalize_three_year_return_rows_core
 from .solvency_navigation import apply_navigation_labels
+from .solvency_filing_catalog import filing_codes, filing_row_code
+from .solvency_disclosure_policy import is_dash_value, is_disclosed_zero
 
 
 STANDARD_COLUMNS = [
@@ -19,7 +26,28 @@ STANDARD_COLUMNS = [
     "报告类型", "报告年度", "报告季度", "报告期", "披露日期",
     "一级模块", "二级模块", "行次", "指标编码", "指标名称", "期间口径",
     "数值", "单位", "数据类型", "是否预测", "来源页码", "原始披露值", "备注",
-    "来源类型", "指标属性", "来源文件", "来源工作表", "导入批次", "计算逻辑",
+    "来源类型", "指标属性", "来源文件", "来源工作表", "导入批次", "计算逻辑", "披露状态",
+]
+
+# User-facing STEP3/STEP5 exchange schema.  The wider STANDARD_COLUMNS schema
+# remains the internal source of truth so identity, provenance and profile
+# fields stay available to validation and downstream report logic.
+NARROW_TABLE_COLUMNS = [
+    "公司",
+    "同业分类",
+    "报告期",
+    "一级模块",
+    "二级模块",
+    "指标编码",
+    "指标名称",
+    "期间口径",
+    "数值",
+    "单位",
+    "数据类型",
+    "来源类型",
+    "指标属性",
+    "计算逻辑",
+    "披露状态",
 ]
 
 LIFE_COMPANY_TYPES = ("寿险", "健康险", "养老险")
@@ -45,19 +73,45 @@ _CURRENCY_UNIT_IN_YUAN = {
 }
 
 _INLINE_UNIT_PATTERN = re.compile(
-    r"[（(]\s*(亿元|万元|千元|元|%|％|百分比|百分点|人|户|件|次|级)\s*[）)]"
+    r"[（(]\s*(?:单位\s*[:：]?\s*)?"
+    r"(亿元|万元|千元|元|%|％|百分比|百分点|人|户|件|次|级)\s*[）)]"
 )
+
+_PERIOD_UNIT_GROUP_PATTERN = re.compile(
+    r"[（(]\s*(?:单位\s*[:：]?\s*)?"
+    r"(?:(?:亿元|万元|千元|元|%|％|百分比|百分点|人|户|件|次|级)"
+    r"(?:\s*[,，、/＋+]\s*)?)+\s*[）)]"
+)
+
+_DEFERRED_TAX_ASSET_LABEL = "递延所得税资产（由经营性亏损引起的递延所得税资产除外）"
 
 
 PERIOD_TERMS = [
+    "基本情景下的下季度末预测", "基本情景下的下季度预测",
+    "下季度末预测", "下季度预测", "本季度末", "上季度末",
     "本季度末数", "上季度末数", "下季度末预测数", "下季度预测数",
     "基本情景下的下季度预测数", "本季度数", "上季度数",
-    "本年累计数", "期末数", "期初数", "未来3个月", "未来12个月",
+    "本年度累计数", "本年累计数", "期末数", "期初数", "未来3个月", "未来12个月",
     "账面价值", "非认可", "认可价值",
 ]
 PERIOD_ALIASES = {
+    "本季度末": "本季度末数",
+    "上季度末": "上季度末数",
+    "下季度末预测": "下季度末预测数",
+    "下季度预测": "下季度末预测数",
+    "基本情景下的下季度末预测": "下季度末预测数",
+    "基本情景下的下季度预测": "下季度末预测数",
     "下季度预测数": "下季度末预测数",
     "基本情景下的下季度预测数": "下季度末预测数",
+    "本年度累计数": "本年累计数",
+}
+
+SOURCE_AGGREGATE_DEDUPE_CODES = {"ACTUAL_CAPITAL"}
+MINIMUM_CAPITAL_EXACT_ONLY_CODES = {
+    "QUANT_RISK_CAPITAL",
+    "CONTROL_RISK_CAPITAL",
+    "ADDITIONAL_CAPITAL",
+    "MINIMUM_CAPITAL",
 }
 
 TABLE_ALLOWED_CODES = {
@@ -79,19 +133,57 @@ TABLE_ALLOWED_CODES = {
         "COMBINED_SOLVENCY_RATIO",
     },
     "ACTUAL_CAPITAL": {
+        "RECOGNIZED_ASSETS",
+        "RECOGNIZED_LIABILITIES",
         "ACTUAL_CAPITAL",
         "CORE_T1_CAPITAL",
         "CORE_T2_CAPITAL",
         "ANC_T1_CAPITAL",
         "ANC_T2_CAPITAL",
+        "NET_ASSETS",
         "POLICY_SURPLUS_CORE_T1",
         "POLICY_SURPLUS_CORE_T2",
         "POLICY_SURPLUS_ANC_T1",
         "POLICY_SURPLUS_ANC_T2",
+        "FINANCIAL_STATEMENT_ASSETS",
+        "FINANCIAL_STATEMENT_LIABILITIES",
+        "FINANCIAL_STATEMENT_NET_ASSETS",
+        "NET_ASSET_ADJUSTMENT",
+        "NON_RECOGNIZED_ASSET_BOOK_VALUE",
+        "LONG_TERM_EQUITY_VALUATION_DIFFERENCE",
+        "DEFERRED_TAX_ASSET_ADJUSTMENT",
+        "OTHER_CORE_T1_ADJUSTMENT",
+        "CORE_T1_INVESTMENT_PROPERTY_FAIR_VALUE_ADJUSTMENT",
+        "AGRICULTURAL_CATASTROPHE_RISK_RESERVE",
+        "QUALIFYING_CORE_T1_LIABILITY_CAPITAL",
+        "CORE_T2_PREFERRED_SHARES",
+        "OTHER_CORE_T2_CAPITAL",
+        "CORE_T2_EXCESS_DEDUCTION",
+        "ANC_T1_SUBORDINATED_TERM_DEBT",
+        "ANC_T1_CAPITAL_SUPPLEMENTARY_BONDS",
+        "ANC_T1_CONVERTIBLE_SUBORDINATED_DEBT",
+        "ANC_T1_DEFERRED_TAX_ASSET",
+        "ANC_T1_INVESTMENT_PROPERTY_FAIR_VALUE",
+        "OTHER_ANC_T1_CAPITAL",
+        "ANC_T1_EXCESS_DEDUCTION",
+        "EMERGENCY_OTHER_ANC_T2_CAPITAL",
+        "ANC_T2_EXCESS_DEDUCTION",
     },
     "THREE_YEAR_INVESTMENT_RETURN": {
         "INVESTMENT_RETURN",
         "COMPREHENSIVE_INVESTMENT_RETURN",
+    },
+    "RECOGNIZED_ASSETS": {
+        "RECOGNIZED_ASSETS",
+        "CASH_LIQUID_ASSETS",
+        "INVESTMENT_ASSETS",
+        "REINSURANCE_ASSETS",
+        "SUBSIDIARY_JV_ASSOCIATE_EQUITY",
+        "RECEIVABLES_AND_PREPAYMENTS",
+        "FIXED_ASSETS",
+        "LAND_USE_RIGHTS",
+        "SEPARATE_ACCOUNT_ASSETS",
+        "OTHER_RECOGNIZED_ASSETS",
     },
 }
 
@@ -135,6 +227,15 @@ def parse_numeric(value):
 def _normalize_label(value: str) -> str:
     text = _INLINE_UNIT_PATTERN.sub("", str(value or ""))
     return re.sub(r"[\s：:（）()、，,。·—\-_/]", "", text)
+
+
+def _normalize_operating_label(value: str) -> str:
+    text = re.sub(
+        r"^\s*(?:[（(][一二三四五六七八九十百\d]+[）)]|\d+(?:\.\d+)*[.、])\s*",
+        "",
+        str(value or ""),
+    )
+    return _normalize_label(text)
 
 
 def normalize_company_type(
@@ -252,11 +353,33 @@ def resolve_metric_match(
     minimum_score: float = 0.72,
     ambiguity_margin: float = 0.08,
 ) -> MetricMatchDecision:
-    normalized = _normalize_label(label)
+    checklist_code = filing_row_code(table_id, label)
+    checklist_metric = taxonomy[taxonomy['指标编码'].eq(checklist_code)]
+    if not checklist_metric.empty:
+        return MetricMatchDecision(checklist_metric.iloc[0], 2.0, 0.0, False, '按填报清单及来源表精确匹配')
+    if table_id == "MINIMUM_CAPITAL" and re.search(
+        r"未考虑.*特征系数|特征系数.*调整前",
+        str(label or ""),
+    ):
+        return MetricMatchDecision(
+            None,
+            0.0,
+            0.0,
+            False,
+            "特征系数调整前金额不等同于量化风险最低资本",
+        )
+    exact_only = table_id == "OPERATING_METRICS"
+    normalized = (
+        _normalize_operating_label(label)
+        if exact_only
+        else _normalize_label(label)
+    )
     if not normalized:
         return MetricMatchDecision(None, 0.0, 0.0, False, "项目名称为空")
     candidates = candidates or _taxonomy_candidates(taxonomy)
     allowed_codes = TABLE_ALLOWED_CODES.get(table_id)
+    if allowed_codes is not None:
+        allowed_codes = set(allowed_codes) | filing_codes(table_id)
     if table_id == "OPERATING_METRICS":
         allowed_codes = set(
             taxonomy.loc[taxonomy["一级模块"] == "经营指标", "指标编码"].astype(str)
@@ -265,6 +388,9 @@ def resolve_metric_match(
         allowed_codes = set(
             taxonomy.loc[taxonomy["一级模块"] == "最低资本", "指标编码"].astype(str)
         )
+        allowed_codes.add("MINIMUM_CAPITAL")
+    if allowed_codes is not None:
+        allowed_codes |= filing_codes(table_id)
 
     ranked: list[tuple[float, bool, int]] = []
     for index, aliases in candidates:
@@ -279,6 +405,8 @@ def resolve_metric_match(
             if alias == normalized:
                 score = 2.0
                 exact = True
+            elif exact_only:
+                score = 0.0
             elif alias in normalized or normalized in alias:
                 score = min(len(alias), len(normalized)) / max(len(alias), len(normalized)) + 0.5
             else:
@@ -294,10 +422,25 @@ def resolve_metric_match(
     runner_score = ranked[1][0] if len(ranked) > 1 else 0.0
     runner_exact = ranked[1][1] if len(ranked) > 1 else False
     best_name = str(taxonomy.loc[best_index].get("指标名称", ""))
+    best_code = str(taxonomy.loc[best_index].get("指标编码", "")).strip()
     runner_name = (
         str(taxonomy.loc[ranked[1][2]].get("指标名称", ""))
         if len(ranked) > 1 else ""
     )
+    if (
+        table_id == "MINIMUM_CAPITAL"
+        and best_code in MINIMUM_CAPITAL_EXACT_ONLY_CODES
+        and not exact
+    ):
+        return MetricMatchDecision(
+            None,
+            best_score,
+            runner_score,
+            False,
+            "最低资本汇总指标仅接受精确名称或正式别名",
+            best_name,
+            runner_name,
+        )
     if best_score < minimum_score:
         return MetricMatchDecision(
             None,
@@ -340,12 +483,86 @@ def match_metric(label: str, taxonomy: pd.DataFrame, candidates=None):
     return resolve_metric_match(label, taxonomy, candidates).metric
 
 
-def _period_header(row: list[str], index: int) -> str:
+def _period_header(row: list[str], index: int, *, table_id: str = "") -> str:
+    if table_id == "THREE_YEAR_INVESTMENT_RETURN":
+        return "近三年平均"
     current = str(row[index]).strip() if index < len(row) else ""
+    compact = re.sub(r"\s+", "", current).replace("(", "（").replace(")", "）")
+    compact = _PERIOD_UNIT_GROUP_PATTERN.sub("", compact).strip("/：:")
+    if table_id == "OPERATING_METRICS":
+        if any(term in compact for term in ("本季度（末）数", "本季度（末）", "本季度数")):
+            return "本季度数"
+        if any(term in compact for term in (
+            "本年累计（末）数", "本年累计（末）",
+            "本年度累计（末）数", "本年度累计（末）",
+            "本年累计数", "本年度累计数",
+        )):
+            return "本年累计数"
     for term in PERIOD_TERMS:
-        if term in current:
+        if term in compact:
             return PERIOD_ALIASES.get(term, term)
-    return current or f"列{index + 1}"
+    return compact or f"列{index + 1}"
+
+
+def _recognized_assets_subcolumn(header: str) -> str:
+    """返回认可资产表两级表头列的二级口径（账面价值/非认可价值/认可价值）。"""
+    compact = re.sub(r"\s+", "", str(header or ""))
+    if compact.endswith("/账面价值"):
+        return "账面价值"
+    if compact.endswith("/非认可价值") or compact.endswith("/非认可"):
+        return "非认可价值"
+    if compact.endswith("/认可价值"):
+        return "认可价值"
+    return ""
+
+
+def _normalize_canonical_table(table, taxonomy, metadata, identity, peer_group, report_profile_id):
+    """Keep VLM's canonical IDs and disclosure states; never fuzzy-rematch them."""
+    by_code = taxonomy.drop_duplicates('指标编码').set_index('指标编码')
+    result = []
+    for raw in table.metric_records:
+        code = str(raw.get('指标编码', ''))
+        if code not in by_code.index:
+            continue
+        metric = by_code.loc[code]
+        status = str(raw.get('状态', 'not_disclosed'))
+        dtype = str(metric.get('数据类型', '金额'))
+        if status in {'found', 'disclosed_na', 'disclosed_zero'} and dtype not in {'文本', '评级', '布尔'} and is_disclosed_zero(raw.get('原始值')):
+            status = 'disclosed_zero'
+        value = np.nan
+        if status == 'found':
+            value = raw.get('原始值', '') if dtype in {'文本', '评级', '布尔'} else parse_numeric(raw.get('标准数值'))
+        elif status == 'disclosed_zero':
+            value = 0.0
+        period = str(raw.get('期间口径') or '本季度末数')
+        if str(raw.get('指标语义键', '')).endswith(':THREE_YEAR_AVERAGE'):
+            period = '近三年平均'
+        elif table.table_id == 'OPERATING_METRICS' and any(
+            term in period for term in ('本季度数', '本季度（末）数', '本季度(末)数', '当季数')
+        ) and '累计' not in period:
+            period = '本季度数'
+        elif any(term in period for term in ('本季度', '期末', '本期')) and not any(term in period for term in ('上季度', '期初', '预测', '累计')):
+            period = '本季度末数'
+        state = {'found':'已披露', 'disclosed_zero':'已披露为0', 'disclosed_na':'不适用', 'not_disclosed':'未披露'}.get(status, '未披露')
+        result.append({
+            '公司': identity.standard_name, '原始公司名称': identity.original_name,
+            '标准公司名称': identity.standard_name, '公司统一编码': identity.company_code,
+            '公司类型': identity.company_type, '同业分类': peer_group, '报告类型': report_profile_id,
+            '报告年度': metadata.get('报告年度'), '报告季度': metadata.get('报告季度', ''),
+            '报告期': metadata.get('报告期', ''), '披露日期': metadata.get('披露日期', ''),
+            '一级模块': metric.get('一级模块', ''), '二级模块': metric.get('二级模块', ''),
+            '行次': '', '指标编码': code, '指标名称': metric['指标名称'], '期间口径': period,
+            '数值': value, '单位': metric.get('标准单位', ''), '数据类型': dtype,
+            '是否预测': '是' if '预测' in period else '否',
+            '来源页码': raw.get('物理页码') or '',
+            '原始披露值': raw.get('原始值') if raw.get('原始值') is not None else '',
+            '备注': ('原始披露为横杠，按填报规则转换为0。' if status == 'disclosed_zero' and is_dash_value(raw.get('原始值')) else '原始披露为数值0。' if status == 'disclosed_zero' else '')
+                    + str(raw.get('证据原文') or ''),
+            '来源类型': '报告提取', '指标属性': '披露', '来源文件': metadata.get('来源文件', ''),
+            '来源工作表': table.table_name, '导入批次': metadata.get('导入批次', ''),
+            '计算逻辑': '', '披露状态': state,
+        })
+    return result
 
 
 def normalize_tables(
@@ -357,16 +574,32 @@ def normalize_tables(
     diagnostics: list[dict] | None = None,
     allowed_company_types: Sequence[str] | None = None,
     peer_group: str = "",
+    peer_group_map: Mapping[str, str] | None = None,
+    default_peer_group: str = "",
 ) -> pd.DataFrame:
     company_type = normalize_company_type(company_type, allowed_company_types)
     company_identity = resolve_company_identity(
         metadata.get("公司", ""),
         fallback_company_type=company_type,
     )
+    resolved_peer_group = str(peer_group or "").strip()
+    if not resolved_peer_group and peer_group_map:
+        resolved_peer_group = resolve_peer_group(
+            metadata.get("公司", ""),
+            peer_group_map,
+            fallback_peer_group=default_peer_group,
+        )
     records: list[dict] = []
     candidates = _taxonomy_candidates(taxonomy)
     for table in tables:
+        if getattr(table, 'metric_records', None):
+            records.extend(_normalize_canonical_table(
+                table, taxonomy, metadata, company_identity, resolved_peer_group, report_profile_id,
+            ))
+            continue
         rows = table.rows
+        if table.table_id == "THREE_YEAR_INVESTMENT_RETURN":
+            rows, _ = normalize_three_year_return_rows_core(table.table_id, rows)
         if len(rows) < 2:
             continue
         second_header = rows[1] if len(rows) > 1 else []
@@ -393,17 +626,85 @@ def normalize_tables(
                     parts.append(value)
             headers.append("/".join(parts))
 
+        deferred_tax_signs: set[int] = set()
+        if table.table_id == "ACTUAL_CAPITAL":
+            target_label = _normalize_label(_DEFERRED_TAX_ASSET_LABEL)
+            for source_row in rows[data_start:]:
+                padded = source_row + [""] * (max_width - len(source_row))
+                source_row_number = (
+                    padded[0]
+                    if re.fullmatch(r"\d+(?:\.\d+)*\*?", padded[0].strip())
+                    else ""
+                )
+                source_label_index = 1 if source_row_number and max_width > 1 else 0
+                source_label = padded[source_label_index].strip()
+                if source_row_number or _normalize_label(source_label) != target_label:
+                    continue
+                for raw_value in padded[source_label_index + 1:]:
+                    numeric_value = parse_numeric(raw_value)
+                    if pd.isna(numeric_value) or numeric_value == 0:
+                        continue
+                    deferred_tax_signs.add(1 if numeric_value > 0 else -1)
+
         for row in rows[data_start:]:
             row = row + [""] * (max_width - len(row))
             row_number = row[0] if re.fullmatch(r"\d+(?:\.\d+)*\*?", row[0].strip()) else ""
             label_index = 1 if row_number and max_width > 1 else 0
             label = row[label_index].strip()
-            decision = resolve_metric_match(
-                label,
-                taxonomy,
-                candidates,
-                table_id=table.table_id,
-            )
+            decision = None
+            contextual_code = filing_row_code(table.table_id, label, row_number)
+            contextual_metric = taxonomy[taxonomy['指标编码'].eq(contextual_code)]
+            if not contextual_metric.empty:
+                decision = MetricMatchDecision(contextual_metric.iloc[0], 2.0, 0.0, False, '按来源表和清单行次匹配')
+            elif (
+                table.table_id == "MINIMUM_CAPITAL"
+                and row_number.startswith("3.")
+                and "附加资本" in label
+            ):
+                decision = MetricMatchDecision(
+                    None,
+                    0.0,
+                    0.0,
+                    False,
+                    "附加资本明细行不作为附加资本合计重复入表",
+                )
+            elif table.table_id == "ACTUAL_CAPITAL" and row_number:
+                contextual = resolve_metric_match(
+                    f"{row_number} {label}",
+                    taxonomy,
+                    candidates,
+                    table_id=table.table_id,
+                )
+                if contextual.metric is not None and contextual.score == 2.0:
+                    decision = contextual
+            elif (
+                table.table_id == "ACTUAL_CAPITAL"
+                and deferred_tax_signs == {-1, 1}
+                and _normalize_label(label) == _normalize_label(_DEFERRED_TAX_ASSET_LABEL)
+            ):
+                row_values = [parse_numeric(value) for value in row[label_index + 1:]]
+                numeric_values = [value for value in row_values if not pd.isna(value) and value != 0]
+                if numeric_values and all(value > 0 for value in numeric_values):
+                    ancillary = taxonomy.loc[
+                        taxonomy["指标编码"].astype(str).eq("ANC_T1_DEFERRED_TAX_ASSET")
+                    ]
+                    if not ancillary.empty:
+                        decision = MetricMatchDecision(
+                            ancillary.iloc[-1],
+                            2.0,
+                            0.0,
+                            False,
+                            "同表存在正负两组同名递延所得税资产，正值组按附属一级资本识别",
+                            str(ancillary.iloc[-1].get("指标名称", "")),
+                            "",
+                        )
+            if decision is None:
+                decision = resolve_metric_match(
+                    label,
+                    taxonomy,
+                    candidates,
+                    table_id=table.table_id,
+                )
             metric = decision.metric
             if metric is None:
                 if diagnostics is not None and label:
@@ -421,6 +722,12 @@ def normalize_tables(
                 continue
             value_start = label_index + 1
             for column_index in range(value_start, max_width):
+                if table.table_id == "RECOGNIZED_ASSETS" and (
+                    _recognized_assets_subcolumn(headers[column_index])
+                    in ("账面价值", "非认可价值")
+                ):
+                    # 认可资产表主要指标仅取“认可价值”口径，账面价值与非认可价值列仅用于核对。
+                    continue
                 raw_value = row[column_index]
                 numeric_value = parse_numeric(raw_value)
                 data_type = str(metric.get("数据类型", "金额"))
@@ -431,20 +738,33 @@ def normalize_tables(
                     if not value:
                         continue
                 else:
+                    marker = str(raw_value or "").strip()
+                    explicit_zero = False
                     if pd.isna(numeric_value):
-                        continue
-                    value = numeric_value
+                        if is_dash_value(marker):
+                            value = 0.0
+                            explicit_zero = True
+                            note = "原始披露为横线，按填报规则转换为0"
+                        elif marker in {'不适用', '<不适用>'}:
+                            value = np.nan
+                            note = '原始披露明确为不适用，保留不适用状态'
+                        else:
+                            continue
+                    else:
+                        value = numeric_value
                     source_unit = _source_unit(
                         table,
                         label,
                         headers[column_index],
                         target_unit,
                     )
-                    if target_unit in _CURRENCY_UNIT_IN_YUAN and not source_unit:
+                    if explicit_zero:
+                        pass
+                    elif target_unit in _CURRENCY_UNIT_IN_YUAN and not source_unit:
                         note = "未识别原始单位，数值未换算"
                     else:
                         value, note = _convert_unit(value, source_unit, target_unit)
-                period = _period_header(headers, column_index)
+                period = _period_header(headers, column_index, table_id=table.table_id)
                 if period.endswith("/认可价值"):
                     period = period.removesuffix("/认可价值")
                 elif period.endswith("/账面价值"):
@@ -457,7 +777,7 @@ def normalize_tables(
                     "标准公司名称": company_identity.standard_name,
                     "公司统一编码": company_identity.company_code,
                     "公司类型": company_identity.company_type,
-                    "同业分类": peer_group,
+                    "同业分类": resolved_peer_group,
                     "报告类型": report_profile_id,
                     "报告年度": metadata.get("报告年度"),
                     "报告季度": metadata.get("报告季度", ""),
@@ -482,8 +802,23 @@ def normalize_tables(
                     "来源工作表": table.table_name,
                     "导入批次": metadata.get("导入批次", ""),
                     "计算逻辑": "",
+                    "披露状态": ('不适用' if pd.isna(value) else '已披露为0' if data_type not in {'文本', '评级', '布尔'} and value == 0 else '已披露'),
                 })
-    return apply_navigation_labels(pd.DataFrame(records, columns=STANDARD_COLUMNS))
+    result = pd.DataFrame(records, columns=STANDARD_COLUMNS)
+    if not result.empty:
+        dedupe_mask = result["指标编码"].astype(str).isin(SOURCE_AGGREGATE_DEDUPE_CODES)
+        dedupe_key = [
+            "公司统一编码",
+            "报告期",
+            "来源文件",
+            "来源工作表",
+            "指标编码",
+            "期间口径",
+            "数值",
+        ]
+        deduped = result.loc[dedupe_mask].drop_duplicates(subset=dedupe_key, keep="last")
+        result = pd.concat([result.loc[~dedupe_mask], deduped], ignore_index=True).sort_index()
+    return apply_navigation_labels(result.reindex(columns=STANDARD_COLUMNS))
 
 
 def standardize_uploaded_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -491,7 +826,32 @@ def standardize_uploaded_frame(frame: pd.DataFrame) -> pd.DataFrame:
     for column in STANDARD_COLUMNS:
         if column not in result.columns:
             result[column] = ""
+    # Display/export uses a literal marker; arithmetic always works with NaN.
+    missing_value = result['数值'].astype(str).str.strip().eq('未披露')
+    result['披露状态'] = result['披露状态'].fillna('').astype(object)
+    result.loc[missing_value, '数值'] = np.nan
+    result.loc[missing_value, '披露状态'] = '未披露'
+    blank = result['披露状态'].fillna('').astype(str).str.strip().eq('')
+    present = result['数值'].notna() & result['数值'].astype(str).str.strip().ne('')
+    calculated = result['来源类型'].eq('系统计算')
+    result.loc[blank & present & ~calculated, '披露状态'] = '已披露'
+    result.loc[blank & present & calculated, '披露状态'] = '已计算'
     return apply_navigation_labels(result[STANDARD_COLUMNS])
+
+
+def narrow_table_view(frame: pd.DataFrame | None) -> pd.DataFrame:
+    """Return the compact STEP3/STEP5 display and workbook exchange schema."""
+    if not isinstance(frame, pd.DataFrame):
+        return pd.DataFrame(columns=NARROW_TABLE_COLUMNS)
+    result = frame.copy()
+    for column in NARROW_TABLE_COLUMNS:
+        if column not in result.columns:
+            result[column] = ""
+    missing = result['披露状态'].eq('未披露') & (
+        result['数值'].isna() | result['数值'].astype(str).str.strip().isin({'', '未披露'}))
+    result['数值'] = result['数值'].astype(object)
+    result.loc[missing, '数值'] = '未披露'
+    return result.reindex(columns=NARROW_TABLE_COLUMNS)
 
 
 def upgrade_standard_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -499,4 +859,3 @@ def upgrade_standard_frame(frame: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(frame, pd.DataFrame):
         return pd.DataFrame(columns=STANDARD_COLUMNS)
     return apply_company_identities(standardize_uploaded_frame(frame))
-

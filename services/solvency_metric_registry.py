@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pandas as pd
+from .solvency_filing_catalog import extend_filing_taxonomy
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,7 @@ class MetricDefinition:
     formula: str = ""
     dependencies: tuple[str, ...] = ()
     external_transform: str = "identity"
+    step5_wide_mapping: str = "是"
 
     def taxonomy_row(self) -> dict:
         return {
@@ -29,13 +31,47 @@ class MetricDefinition:
             "标准单位": self.unit,
             "数据类型": self.data_type,
             "核心指标": "否",
-            "允许期间口径": "本季度末数|上季度末数|期末数|期初数",
+            "允许期间口径": "本季度末数|上季度末数|下季度末预测数|期末数|期初数",
             "说明": self.formula,
+            "STEP5宽表映射": self.step5_wide_mapping,
         }
 
 
 SUPPLEMENTAL_BASE_METRICS = (
     MetricDefinition("NON_LIFE_INSURANCE_RISK_CAPITAL", "非寿险业务保险风险最低资本合计", "最低资本", "保险风险", "万元", "金额", "披露"),
+    MetricDefinition(
+        "LOSS_OCCURRENCE_RISK_CAPITAL",
+        "寿险业务保险风险-损失发生风险最低资本",
+        "最低资本",
+        "保险风险",
+        "万元",
+        "金额",
+        "披露",
+        ("损失发生风险最低资本",),
+    ),
+    MetricDefinition(
+        "EXPENSE_RISK_CAPITAL",
+        "寿险业务保险风险-费用风险最低资本",
+        "最低资本",
+        "保险风险",
+        "万元",
+        "金额",
+        "披露",
+        ("费用风险最低资本",),
+    ),
+    MetricDefinition(
+        "LIFE_INSURANCE_RISK_DIVERSIFICATION_EFFECT",
+        "寿险业务保险风险-风险分散效应",
+        "最低资本",
+        "保险风险",
+        "万元",
+        "金额",
+        "披露",
+        (
+            "寿险业务保险风险间的相关性效应",
+            "寿险业务保险风险分散效应",
+        ),
+    ),
     MetricDefinition("QUANT_RISK_DIVERSIFICATION_EFFECT", "量化风险分散效应", "最低资本", "量化风险", "万元", "金额", "披露"),
     MetricDefinition("CONTRACT_LOSS_ABSORPTION_EFFECT", "特定类别保险合同损失吸收效应", "最低资本", "量化风险", "万元", "金额", "披露"),
     MetricDefinition("REAL_ESTATE_RISK_CAPITAL", "市场风险-房地产价格风险最低资本", "最低资本", "市场风险", "万元", "金额", "披露", ("房地产价格风险最低资本",)),
@@ -49,14 +85,100 @@ SUPPLEMENTAL_BASE_METRICS = (
     MetricDefinition("POLICY_SURPLUS_CORE_T2", "计入核心二级资本的保单未来盈余", "实际资本", "保单未来盈余", "万元", "金额", "披露"),
     MetricDefinition("POLICY_SURPLUS_ANC_T1", "计入附属一级资本的保单未来盈余", "实际资本", "保单未来盈余", "万元", "金额", "披露"),
     MetricDefinition("POLICY_SURPLUS_ANC_T2", "计入附属二级资本的保单未来盈余", "实际资本", "保单未来盈余", "万元", "金额", "披露"),
-    MetricDefinition("REGISTERED_CAPITAL", "注册资本", "经营指标", "资本结构", "万元", "金额", "披露"),
+    MetricDefinition(
+        "CORE_T1_INVESTMENT_PROPERTY_FAIR_VALUE_ADJUSTMENT",
+        "投资性房地产公允价值增值（核心一级资本调整）",
+        "实际资本", "核心一级资本调整", "万元", "金额", "披露",
+        ("投资性房地产（包括保险公司以物权方式或通过子公司等方式持有的投资性房地产）的公允价值增值（扣除减值、折旧及所得税影响）",),
+        step5_wide_mapping="否",
+    ),
+    MetricDefinition(
+        "AGRICULTURAL_CATASTROPHE_RISK_RESERVE",
+        "对农业保险提取的大灾风险准备金",
+        "实际资本", "核心一级资本调整", "万元", "金额", "披露",
+        step5_wide_mapping="否",
+    ),
+    MetricDefinition(
+        "QUALIFYING_CORE_T1_LIABILITY_CAPITAL",
+        "符合核心一级资本标准的负债类资本工具且按规定可计入核心一级资本的金额",
+        "实际资本", "核心一级资本调整", "万元", "金额", "披露",
+        step5_wide_mapping="否",
+    ),
+    MetricDefinition(
+        "CORE_T2_PREFERRED_SHARES", "核心二级资本-优先股",
+        "实际资本", "核心二级资本明细", "万元", "金额", "披露",
+        ("优先股",), step5_wide_mapping="否",
+    ),
+    MetricDefinition(
+        "OTHER_CORE_T2_CAPITAL", "其他核心二级资本",
+        "实际资本", "核心二级资本明细", "万元", "金额", "披露",
+        step5_wide_mapping="否",
+    ),
+    MetricDefinition(
+        "CORE_T2_EXCESS_DEDUCTION", "核心二级资本超限额应扣除部分",
+        "实际资本", "核心二级资本明细", "万元", "金额", "披露",
+        ("2.4 减：超限额应扣除的部分",), step5_wide_mapping="否",
+    ),
+    MetricDefinition(
+        "ANC_T1_SUBORDINATED_TERM_DEBT", "附属一级资本-次级定期债务",
+        "实际资本", "附属一级资本明细", "万元", "金额", "披露",
+        ("次级定期债务",), step5_wide_mapping="否",
+    ),
+    MetricDefinition(
+        "ANC_T1_CAPITAL_SUPPLEMENTARY_BONDS", "附属一级资本-资本补充债券",
+        "实际资本", "附属一级资本明细", "万元", "金额", "披露",
+        ("资本补充债券",), step5_wide_mapping="否",
+    ),
+    MetricDefinition(
+        "ANC_T1_CONVERTIBLE_SUBORDINATED_DEBT", "附属一级资本-可转换次级债",
+        "实际资本", "附属一级资本明细", "万元", "金额", "披露",
+        ("可转换次级债",), step5_wide_mapping="否",
+    ),
+    MetricDefinition(
+        "ANC_T1_DEFERRED_TAX_ASSET",
+        "附属一级资本-递延所得税资产（由经营性亏损引起的递延所得税资产除外）",
+        "实际资本", "附属一级资本明细", "万元", "金额", "披露",
+        ("3.4 递延所得税资产（由经营性亏损引起的递延所得税资产除外）",),
+        step5_wide_mapping="否",
+    ),
+    MetricDefinition(
+        "ANC_T1_INVESTMENT_PROPERTY_FAIR_VALUE",
+        "投资性房地产公允价值增值可计入附属一级资本的金额",
+        "实际资本", "附属一级资本明细", "万元", "金额", "披露",
+        ("投资性房地产（包括保险公司以物权方式或通过子公司等方式持有的投资性房地产）公允价值增值可计入附属一级资本的金额（扣除减值、折旧及所得税影响）",),
+        step5_wide_mapping="否",
+    ),
+    MetricDefinition(
+        "OTHER_ANC_T1_CAPITAL", "其他附属一级资本",
+        "实际资本", "附属一级资本明细", "万元", "金额", "披露",
+        step5_wide_mapping="否",
+    ),
+    MetricDefinition(
+        "ANC_T1_EXCESS_DEDUCTION", "附属一级资本超限额应扣除部分",
+        "实际资本", "附属一级资本明细", "万元", "金额", "披露",
+        ("3.8 减：超限额应扣除的部分",), step5_wide_mapping="否",
+    ),
+    MetricDefinition(
+        "EMERGENCY_OTHER_ANC_T2_CAPITAL", "应急资本等其他附属二级资本",
+        "实际资本", "附属二级资本明细", "万元", "金额", "披露",
+        step5_wide_mapping="否",
+    ),
+    MetricDefinition(
+        "ANC_T2_EXCESS_DEDUCTION", "附属二级资本超限额应扣除部分",
+        "实际资本", "附属二级资本明细", "万元", "金额", "披露",
+        ("4.3 减：超限额应扣除的部分",), step5_wide_mapping="否",
+    ),
+    MetricDefinition(
+        "REGISTERED_CAPITAL", "注册资本", "经营指标", "资本结构", "万元", "金额", "披露",
+        ("注册资本金", "公司注册资本", "注册资本（万元）", "注册资本（亿元）"),
+    ),
 )
 
 
 DERIVED_METRICS = (
     MetricDefinition(
         "POLICY_SURPLUS_CORE_TO_ACTUAL_CAPITAL", "保单未来盈余/核心资本", "派生指标", "保单未来盈余", "倍", "比率", "计算",
-        formula="(计入核心一级资本的保单未来盈余+计入核心二级资本的保单未来盈余)/实际资本",
+        formula="已披露的核心一级及核心二级保单未来盈余之和/实际资本；未披露层级不计入",
         dependencies=("POLICY_SURPLUS_CORE_T1", "POLICY_SURPLUS_CORE_T2", "ACTUAL_CAPITAL"),
     ),
     MetricDefinition(
@@ -76,14 +198,14 @@ DERIVED_METRICS = (
     MetricDefinition("ANC_T2_TO_ACTUAL_CAPITAL", "附属二级资本占比", "实际资本", "附属资本占比分布", "倍", "比率", "计算", formula="附属二级资本/实际资本", dependencies=("ANC_T2_CAPITAL", "ACTUAL_CAPITAL")),
     MetricDefinition(
         "POLICY_SURPLUS_CORE_TO_CORE_CAPITAL", "计入核心资本的保单未来盈余/核心资本的比例", "实际资本", "保单未来盈余", "倍", "比率", "计算",
-        formula="(计入核心一级资本的保单未来盈余+计入核心二级资本的保单未来盈余)/(核心一级资本+核心二级资本)",
+        formula="(已披露的核心一级保单未来盈余+已披露的核心二级保单未来盈余)/(核心一级资本+核心二级资本)；核心二级未披露时仅以核心一级保单未来盈余为分子",
         dependencies=("POLICY_SURPLUS_CORE_T1", "POLICY_SURPLUS_CORE_T2", "CORE_T1_CAPITAL", "CORE_T2_CAPITAL"),
     ),
     MetricDefinition("MINIMUM_CAPITAL_TO_RECOGNIZED_LIABILITIES", "最低资本/认可负债", "派生指标", "资本效率", "倍", "比率", "计算", formula="最低资本/认可负债", dependencies=("MINIMUM_CAPITAL", "RECOGNIZED_LIABILITIES")),
     MetricDefinition(
         "POLICY_SURPLUS_TO_INSURANCE_LIABILITIES", "保单未来盈余/保险合同负债", "派生指标", "保单未来盈余", "倍", "比率", "计算",
-        formula="四类保单未来盈余之和/(保险合同负债+独立账户负债)",
-        dependencies=("POLICY_SURPLUS_CORE_T1", "POLICY_SURPLUS_CORE_T2", "POLICY_SURPLUS_ANC_T1", "POLICY_SURPLUS_ANC_T2", "INSURANCE_CONTRACT_LIABILITY", "SEPARATE_ACCOUNT_LIABILITY"),
+        formula="已披露的各级资本保单未来盈余之和/保险合同负债；未披露层级不计入",
+        dependencies=("POLICY_SURPLUS_CORE_T1", "POLICY_SURPLUS_CORE_T2", "POLICY_SURPLUS_ANC_T1", "POLICY_SURPLUS_ANC_T2", "INSURANCE_CONTRACT_LIABILITY"),
     ),
     MetricDefinition("RECOGNIZED_ASSETS_TO_ACTUAL_CAPITAL", "认可资产/实际资本", "派生指标", "资本效率", "倍", "比率", "计算", formula="认可资产/实际资本", dependencies=("RECOGNIZED_ASSETS", "ACTUAL_CAPITAL")),
     MetricDefinition("RECOGNIZED_ASSETS_TO_MINIMUM_CAPITAL", "认可资产/最低资本", "派生指标", "资本效率", "倍", "比率", "计算", formula="认可资产/最低资本", dependencies=("RECOGNIZED_ASSETS", "MINIMUM_CAPITAL")),
@@ -107,6 +229,10 @@ DERIVED_METRICS = (
     MetricDefinition(
         "CORE_CAPITAL_TO_REGISTERED_CAPITAL", "核心资本/注册资本", "派生指标", "资本结构", "倍", "比率", "计算",
         formula="(核心一级资本+核心二级资本)/注册资本", dependencies=("CORE_T1_CAPITAL", "CORE_T2_CAPITAL", "REGISTERED_CAPITAL"),
+    ),
+    MetricDefinition(
+        "REGISTERED_CAPITAL_TO_CORE_CAPITAL", "注册资本/核心资本率", "派生指标", "资本结构", "倍", "比率", "计算",
+        formula="注册资本/(核心一级资本+核心二级资本)", dependencies=("REGISTERED_CAPITAL", "CORE_T1_CAPITAL", "CORE_T2_CAPITAL"),
     ),
     MetricDefinition("CORE_T1_POLICY_SURPLUS_SHARE", "核心一级资本中的保单未来盈余占比", "派生指标", "保单未来盈余", "倍", "比率", "计算", formula="计入核心一级资本的保单未来盈余/核心一级资本", dependencies=("POLICY_SURPLUS_CORE_T1", "CORE_T1_CAPITAL")),
     MetricDefinition("ANC_T1_POLICY_SURPLUS_SHARE", "附属一级资本中保单未来盈余占比", "派生指标", "保单未来盈余", "倍", "比率", "计算", formula="计入附属一级资本的保单未来盈余/附属一级资本", dependencies=("POLICY_SURPLUS_ANC_T1", "ANC_T1_CAPITAL")),
@@ -166,9 +292,89 @@ CUSTOM_METRICS_BY_CODE = {item.code: item for item in ALL_CUSTOM_METRICS}
 CUSTOM_METRICS_BY_NAME = {item.name: item for item in ALL_CUSTOM_METRICS}
 
 
+METRIC_ALIAS_EXTENSIONS: dict[str, tuple[str, ...]] = {
+    "QUANT_RISK_CAPITAL": (
+        "可资本化风险最低资本",
+        "量化风险最低资本（考虑特征系数后）",
+    ),
+    "ADDITIONAL_CAPITAL": ("附加资本合计",),
+    "MINIMUM_CAPITAL": ("最低资本合计", "最低资本总额"),
+    "ANC_T1_DEFERRED_TAX_ASSET": (
+        "21 递延所得税资产（由经营性亏损引起的递延所得税资产除外）",
+        "递延所得税资产（由经营性亏损引起的递延所得税资产除外）-附属一级资本",
+    ),
+}
+
+
+# These capital components are present as explicit columns in CROSS wide
+# workbooks. Keep the remaining STEP3-only filing rows out of STEP5 mapping.
+STEP5_CROSS_CAPITAL_DETAIL_CODES = {
+    "NON_RECOGNIZED_ASSET_BOOK_VALUE",
+    "LONG_TERM_EQUITY_VALUATION_DIFFERENCE",
+    "CORE_T1_INVESTMENT_PROPERTY_FAIR_VALUE_ADJUSTMENT",
+    "DEFERRED_TAX_ASSET_ADJUSTMENT",
+    "QUALIFYING_CORE_T1_LIABILITY_CAPITAL",
+    "OTHER_CORE_T1_ADJUSTMENT",
+    "ANC_T1_SUBORDINATED_TERM_DEBT",
+    "ANC_T1_CAPITAL_SUPPLEMENTARY_BONDS",
+    "ANC_T1_CONVERTIBLE_SUBORDINATED_DEBT",
+    "ANC_T1_DEFERRED_TAX_ASSET",
+    "ANC_T1_INVESTMENT_PROPERTY_FAIR_VALUE",
+    "OTHER_ANC_T1_CAPITAL",
+}
+
+
+METRIC_PERIOD_EXTENSIONS: dict[str, tuple[str, ...]] = {
+    "INVESTMENT_RETURN": ("本季度数", "近三年平均"),
+    "COMPREHENSIVE_INVESTMENT_RETURN": ("本季度数", "近三年平均"),
+    "NET_ASSETS": (
+        "本季度末数",
+        "上季度末数",
+        "下季度末预测数",
+        "期末数",
+        "期初数",
+    ),
+}
+
+
+def _merge_pipe_values(current: object, additions: tuple[str, ...]) -> str:
+    values = [
+        item.strip()
+        for item in str(current or "").split("|")
+        if item.strip()
+    ]
+    values.extend(item for item in additions if item and item not in values)
+    return "|".join(values)
+
+
 def extend_taxonomy(taxonomy: pd.DataFrame) -> pd.DataFrame:
-    """Add source metrics needed by the CROSS data set without modifying the Excel dictionary."""
-    additions = pd.DataFrame([item.taxonomy_row() for item in SUPPLEMENTAL_BASE_METRICS])
+    """Return the complete system taxonomy used by STEP3 and STEP4."""
+    additions = pd.DataFrame([
+        item.taxonomy_row()
+        for item in (*SUPPLEMENTAL_BASE_METRICS, *DERIVED_METRICS)
+    ])
     existing_codes = set(taxonomy.get("指标编码", pd.Series(dtype=str)).astype(str))
     additions = additions[~additions["指标编码"].isin(existing_codes)]
-    return pd.concat([taxonomy, additions], ignore_index=True).fillna("")
+    result = pd.concat([taxonomy, additions], ignore_index=True).fillna("")
+    for code, aliases in METRIC_ALIAS_EXTENSIONS.items():
+        mask = result["指标编码"].astype(str).eq(code)
+        if mask.any():
+            result.loc[mask, "别名"] = result.loc[mask, "别名"].map(
+                lambda value: _merge_pipe_values(value, aliases)
+            )
+    for code, periods in METRIC_PERIOD_EXTENSIONS.items():
+        mask = result["指标编码"].astype(str).eq(code)
+        if mask.any():
+            result.loc[mask, "允许期间口径"] = result.loc[mask, "允许期间口径"].map(
+                lambda value: _merge_pipe_values(value, periods)
+            )
+    detail_mask = result["指标编码"].astype(str).isin(STEP5_CROSS_CAPITAL_DETAIL_CODES)
+    result.loc[detail_mask, "STEP5宽表映射"] = "是"
+    actual_capital_mask = result["一级模块"].astype(str).eq("实际资本")
+    if actual_capital_mask.any():
+        result.loc[actual_capital_mask, "允许期间口径"] = result.loc[
+            actual_capital_mask, "允许期间口径"
+        ].map(
+            lambda value: _merge_pipe_values(value, ("本季度末数", "上季度末数"))
+        )
+    return extend_filing_taxonomy(result)

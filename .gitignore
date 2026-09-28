@@ -26,6 +26,7 @@ env/
 Download/
 uploads/
 tmp/
+other_doc/output/
 *.log
 
 # Operating system files

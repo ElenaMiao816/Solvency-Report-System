@@ -29,9 +29,9 @@ class ReportProfileTests(unittest.TestCase):
         self.assertEqual(profile.workbook_schema_version, "2.0")
         self.assertEqual(profile.config_version, "2.0")
         self.assertEqual(profile.analysis["comparison_scope"], "WITHIN_PROFILE")
-        self.assertEqual(len(profile.tables), 5)
-        self.assertEqual(len(profile.layout_variants), 12)
-        self.assertEqual(len(profile.completeness_rules), 5)
+        self.assertEqual(len(profile.tables), 7)
+        self.assertEqual(len(profile.layout_variants), 13)
+        self.assertEqual(len(profile.completeness_rules), 6)
         self.assertTrue(
             all(table.get("strategy_id") for table in profile.tables)
         )
@@ -40,9 +40,11 @@ class ReportProfileTests(unittest.TestCase):
             {
                 "SOLVENCY_MAIN",
                 "OPERATING_METRICS",
+                "REGISTERED_CAPITAL",
                 "ACTUAL_CAPITAL",
                 "THREE_YEAR_INVESTMENT_RETURN",
                 "MINIMUM_CAPITAL",
+                "RECOGNIZED_ASSETS",
             },
         )
 
@@ -97,8 +99,8 @@ class ReportProfileTests(unittest.TestCase):
                     restored_table.get(stage_field),
                     original.get(stage_field),
                 )
-        self.assertEqual(len(restored.layout_variants), 12)
-        self.assertEqual(len(restored.completeness_rules), 5)
+        self.assertEqual(len(restored.layout_variants), 13)
+        self.assertEqual(len(restored.completeness_rules), 6)
 
     def test_life_v2_tables_expose_profile_driven_stage_parameters(self):
         profile = load_profile_registry(
@@ -125,6 +127,14 @@ class ReportProfileTests(unittest.TestCase):
         self.assertTrue(
             tables["MINIMUM_CAPITAL"]["boundary_require_value_for_items"]
         )
+        self.assertEqual(
+            tables["RECOGNIZED_ASSETS"]["postprocess_actions"],
+            ["simplify_recognized_assets_columns", "normalize_recognized_assets_total", "trim_adjacent_rows"],
+        )
+        self.assertEqual(
+            tables["RECOGNIZED_ASSETS"]["canonical_headers"],
+            ["行次", "项目", "期末数", "期初数"],
+        )
 
     def test_life_v2_static_workbook_embeds_default_configuration(self):
         workbook_path = (
@@ -140,11 +150,11 @@ class ReportProfileTests(unittest.TestCase):
         self.assertEqual(restored.profile_id, "LIFE_SOLVENCY")
         self.assertEqual(restored.workbook_schema_version, "2.0")
         self.assertEqual(restored.config_version, "2.0")
-        self.assertEqual(len(restored.tables), 5)
-        self.assertEqual(len(restored.layout_variants), 12)
-        self.assertEqual(len(restored.completeness_rules), 5)
-        self.assertEqual(len(restored.taxonomy_frame()), 55)
-        self.assertEqual(len(restored.company_frame()), 76)
+        self.assertEqual(len(restored.tables), 6)
+        self.assertEqual(len(restored.layout_variants), 13)
+        self.assertEqual(len(restored.completeness_rules), 6)
+        self.assertEqual(len(restored.taxonomy_frame()), 88)
+        self.assertEqual(len(restored.company_frame()), 92)
         tables = {table["table_id"]: table for table in restored.tables}
         self.assertEqual(
             tables["ACTUAL_CAPITAL"]["postprocess_actions"],
@@ -168,7 +178,7 @@ class ReportProfileTests(unittest.TestCase):
 
         self.assertEqual(profile.workbook_schema_version, "2.0")
         self.assertEqual(profile.company_types, ("财险",))
-        self.assertEqual(len(profile.tables), 5)
+        self.assertEqual(len(profile.tables), 6)
         self.assertEqual(len(profile.layout_variants), 5)
         self.assertGreaterEqual(len(profile.field_dictionary), 15)
         self.assertEqual(len(profile.companies), 2)
@@ -179,6 +189,15 @@ class ReportProfileTests(unittest.TestCase):
         self.assertEqual(operating["strategy_id"], "generic.grid_table.v1")
         self.assertEqual(operating["minimum_rows"], 5)
         self.assertTrue(operating["boundary_variants"])
+        registered_capital = next(
+            table for table in profile.tables
+            if table["table_id"] == "REGISTERED_CAPITAL"
+        )
+        self.assertEqual(
+            registered_capital["strategy_id"],
+            "generic.grid_table.v1",
+        )
+        self.assertEqual(registered_capital["max_pages"], 1)
 
     def test_non_life_v2_workbook_roundtrip_embeds_all_configuration_sheets(self):
         workbook_path = (
@@ -224,6 +243,9 @@ class ReportProfileTests(unittest.TestCase):
         self.assertIn("当前报告 profile：测试报告", prompt)
         self.assertIn("仅使用测试口径", prompt)
         self.assertIn('"目标表A"', prompt)
+        self.assertIn("目录/标题双通道候选", prompt)
+        self.assertIn("目录驱动", prompt)
+        self.assertIn("标题驱动", prompt)
         self.assertNotIn("五类目标表", prompt)
 
 

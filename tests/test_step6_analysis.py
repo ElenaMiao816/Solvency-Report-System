@@ -57,6 +57,7 @@ class Step6AnalysisTests(unittest.TestCase):
         self.assertEqual(format_chart_value(-6428230, "万元", "金额"), "(6,428,230.00)")
         self.assertEqual(format_chart_value(193.64, "%", "百分比"), "193.6%")
         self.assertEqual(format_chart_value(0.169, "倍", "比率"), "0.17倍")
+        self.assertEqual(format_chart_value(1.2345, "‰", "百分比", 2), "1.23‰")
 
     def test_prepare_analysis_frame_filters_profile_and_non_numeric_rows(self):
         frame = sample_rows()
@@ -74,6 +75,30 @@ class Step6AnalysisTests(unittest.TestCase):
         self.assertEqual(result.iloc[0]["报告类型"], "LIFE_SOLVENCY")
         self.assertEqual(skipped, ("NON_LIFE_SOLVENCY",))
 
+    def test_prepare_analysis_frame_preserves_policy_surplus_unavailable_reason(self):
+        row = sample_rows().iloc[[0]].copy()
+        row["指标编码"] = "POLICY_SURPLUS_CORE_TO_CORE_CAPITAL"
+        row["指标名称"] = "计入核心资本的保单未来盈余/核心资本的比例"
+        row["数值"] = None
+        row["披露状态"] = "无法计算"
+        row["备注"] = "无法计算：计入核心二级资本的保单未来盈余未披露"
+
+        result, _ = prepare_analysis_frame(row, "LIFE_SOLVENCY")
+
+        self.assertEqual(len(result), 1)
+        self.assertTrue(pd.isna(result.iloc[0]["数值"]))
+        self.assertEqual(result.iloc[0]["披露状态"], "无法计算")
+
+    def test_prepare_analysis_frame_repairs_old_full_short_company_codes(self):
+        frame = sample_rows().iloc[[0, 1]].copy()
+        frame["公司"] = ["工银安盛人寿保险有限公司", "工银安盛"]
+        frame["标准公司名称"] = frame["公司"]
+        frame["公司统一编码"] = ["OLD_FULL", "OLD_SHORT"]
+        result, _ = prepare_analysis_frame(frame, "LIFE_SOLVENCY")
+        self.assertEqual(result["公司"].tolist(), ["工银安盛", "工银安盛"])
+        self.assertEqual(result["公司统一编码"].nunique(), 1)
+        self.assertEqual(result["报告期"].tolist(), ["2024Q4", "2025Q4"])
+
     def test_company_and_industry_report_scopes(self):
         frame, _ = prepare_analysis_frame(sample_rows(), "LIFE_SOLVENCY")
         company = report_scope_frame(frame, COMPANY_REPORT)
@@ -86,8 +111,8 @@ class Step6AnalysisTests(unittest.TestCase):
         frame, _ = prepare_analysis_frame(sample_rows(), "LIFE_SOLVENCY")
         result = filter_analysis_frame(
             frame,
-            level_one="偿付能力",
-            level_two="资本",
+            level_one="关键偿付数据概览",
+            level_two="资本充足率",
             company_types=["寿险"],
             peer_groups=["大型公司"],
             companies=["甲人寿"],
@@ -180,6 +205,11 @@ class Step6AnalysisTests(unittest.TestCase):
             self.assertNotIn("追踪状态", str(spec))
             self.assertNotIn("diamond", str(spec))
             self.assertIn("120.00", str(spec))
+            if chart_type in {"簇状柱状图", "横向条形图"}:
+                self.assertEqual(
+                    spec["layer"][0]["encoding"]["color"]["scale"]["range"],
+                    ["#FFA3DA", "#00B8F5", "#FD349C"],
+                )
 
     def test_chart_supports_kpmg_legend_customization_and_layout(self):
         frame, _ = prepare_analysis_frame(sample_rows(), "LIFE_SOLVENCY")

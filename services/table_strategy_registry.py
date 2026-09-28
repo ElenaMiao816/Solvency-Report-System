@@ -17,6 +17,14 @@ from .table_strategy_handlers import (
     MINIMUM_CAPITAL_POSTPROCESS_HANDLER,
     MINIMUM_CAPITAL_PROMPT_HANDLER,
     OPERATING_METRICS_BOUNDARY_HANDLER,
+    RECOGNIZED_ASSETS_BOUNDARY_HANDLER,
+    RECOGNIZED_ASSETS_COMPLETENESS_HANDLER,
+    RECOGNIZED_ASSETS_POSTPROCESS_HANDLER,
+    RECOGNIZED_ASSETS_PROMPT_HANDLER,
+    RECOGNIZED_ASSETS_V2_BOUNDARY_HANDLER,
+    RECOGNIZED_ASSETS_V2_COMPLETENESS_HANDLER,
+    RECOGNIZED_ASSETS_V2_POSTPROCESS_HANDLER,
+    RECOGNIZED_ASSETS_V2_PROMPT_HANDLER,
     OPERATING_METRICS_COMPLETENESS_HANDLER,
     OPERATING_METRICS_PROMPT_HANDLER,
     SOLVENCY_MAIN_BOUNDARY_HANDLER,
@@ -44,6 +52,8 @@ STRATEGY_OPERATING_METRICS = "life_solvency.operating_metrics.v1"
 STRATEGY_ACTUAL_CAPITAL = "life_solvency.actual_capital.v1"
 STRATEGY_THREE_YEAR_RETURN = "life_solvency.three_year_return.v1"
 STRATEGY_MINIMUM_CAPITAL = "life_solvency.minimum_capital.v1"
+STRATEGY_RECOGNIZED_ASSETS = "life_solvency.recognized_assets.v1"
+STRATEGY_RECOGNIZED_ASSETS_V2 = "life_solvency.recognized_assets.v2"
 
 SUPPORTED_STAGES = (
     "locate",
@@ -304,6 +314,30 @@ TABLE_STRATEGIES.register(
         boundary_handler=MINIMUM_CAPITAL_BOUNDARY_HANDLER,
         postprocess_handler=MINIMUM_CAPITAL_POSTPROCESS_HANDLER,
         completeness_handler=GENERIC_COMPLETENESS_HANDLER,
+    ),
+    default=True,
+)
+TABLE_STRATEGIES.register(
+    TableStrategy(
+        strategy_id=STRATEGY_RECOGNIZED_ASSETS,
+        table_id="RECOGNIZED_ASSETS",
+        description="寿险认可资产明细表（S03）两级表头版式处理逻辑（v1，保留以回退）。",
+        prompt_handler=RECOGNIZED_ASSETS_PROMPT_HANDLER,
+        boundary_handler=RECOGNIZED_ASSETS_BOUNDARY_HANDLER,
+        postprocess_handler=RECOGNIZED_ASSETS_POSTPROCESS_HANDLER,
+        completeness_handler=RECOGNIZED_ASSETS_COMPLETENESS_HANDLER,
+    ),
+    default=False,
+)
+TABLE_STRATEGIES.register(
+    TableStrategy(
+        strategy_id=STRATEGY_RECOGNIZED_ASSETS_V2,
+        table_id="RECOGNIZED_ASSETS",
+        description="寿险认可资产明细表（S03）只取认可价值、单级表头（行次/项目/期末数/期初数）版式。",
+        prompt_handler=RECOGNIZED_ASSETS_V2_PROMPT_HANDLER,
+        boundary_handler=RECOGNIZED_ASSETS_V2_BOUNDARY_HANDLER,
+        postprocess_handler=RECOGNIZED_ASSETS_V2_POSTPROCESS_HANDLER,
+        completeness_handler=RECOGNIZED_ASSETS_V2_COMPLETENESS_HANDLER,
     ),
     default=True,
 )

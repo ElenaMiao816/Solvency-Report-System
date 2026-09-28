@@ -11,6 +11,10 @@ from services.solvency_disclosure_normalizer import (
     THREE_YEAR_RETURN_TABLE_ID,
     normalize_three_year_return_rows,
 )
+from services.solvency_hybrid_pipeline import (
+    _deterministic_three_year_rows,
+    _merge_page_rows,
+)
 from services.solvency_pdf_locator import (
     _expand_to_item_boundaries,
     _three_year_page_has_explicit_value,
@@ -287,6 +291,44 @@ class ThreeYearReturnDisclosureTests(unittest.TestCase):
             "近三年平均投资收益率",
             "近三年平均综合投资收益率",
         ))
+
+    def test_section_title_does_not_become_a_duplicate_numeric_row(self):
+        grid_text = "\n".join([
+            "028|（五）近三年（综合）投资收益率",
+            "029|近三年平均投资收益率 3.28%",
+            "030|近三年平均综合投资收益率 3.66%",
+            "031|9",
+        ])
+        grid = PageGrid(11, grid_text, 20)
+
+        sliced = _slice_grid_for_target(
+            THREE_YEAR_RETURN_TABLE_ID,
+            grid_text,
+        )
+        rows, note = _deterministic_three_year_rows(grid)
+        expected_rows, _ = _source_completeness_profile(
+            THREE_YEAR_RETURN_TABLE_ID,
+            [grid],
+        )
+
+        self.assertEqual(len(sliced.splitlines()), 2)
+        self.assertNotIn("（五）近三年（综合）投资收益率", sliced)
+        self.assertEqual(expected_rows, 2)
+        self.assertEqual(rows, [
+            ["项目", "数值"],
+            ["近三年平均投资收益率", "3.28%"],
+            ["近三年平均综合投资收益率", "3.66%"],
+        ])
+        self.assertIn("归一化", note)
+        self.assertEqual(
+            _merge_page_rows(
+                THREE_YEAR_RETURN_TABLE_ID,
+                "近三年（综合）投资收益率",
+                [11],
+                {11: rows},
+            ),
+            rows,
+        )
 
     def test_normalized_sentence_passes_existing_business_boundaries(self):
         normalized, _ = normalize_three_year_return_rows(

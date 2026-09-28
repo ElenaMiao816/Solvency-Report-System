@@ -6,7 +6,8 @@ from collections.abc import Iterable
 import altair as alt
 import pandas as pd
 
-from .solvency_navigation import KPMG_DEFAULT_COLORS
+from .solvency_navigation import KPMG_BRIGHT_CHART_COLORS, KPMG_DEFAULT_COLORS
+from .solvency_company_identity import reconcile_known_company_aliases
 from .solvency_normalizer import STANDARD_COLUMNS, standardize_uploaded_frame
 
 
@@ -40,6 +41,7 @@ def format_chart_value(
     unit_text = str(unit or "").strip()
     type_text = str(data_type or "").strip()
     is_amount = type_text == "金额" or unit_text in {"元", "万元", "亿元"}
+    is_permille = unit_text == "‰"
     is_percent = unit_text in {"%", "％"} or type_text == "百分比"
     is_multiple = unit_text == "倍"
     is_count = type_text == "数量" or unit_text in {"人", "家", "个", "笔"}
@@ -48,6 +50,9 @@ def format_chart_value(
         precision = 2 if decimals is None else max(0, int(decimals))
         formatted = f"{abs(number):,.{precision}f}"
         return f"({formatted})" if number < 0 else formatted
+    if is_permille:
+        precision = 1 if decimals is None else max(0, int(decimals))
+        return f"{number:,.{precision}f}‰"
     if is_percent:
         precision = 1 if decimals is None else max(0, int(decimals))
         return f"{number:,.{precision}f}%"
@@ -103,7 +108,7 @@ def prepare_analysis_frame(
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         return pd.DataFrame(columns=STANDARD_COLUMNS), ()
 
-    result = standardize_uploaded_frame(frame)
+    result = reconcile_known_company_aliases(standardize_uploaded_frame(frame))
     text_columns = [
         "公司",
         "公司类型",
@@ -134,7 +139,15 @@ def prepare_analysis_frame(
 
     result["数值"] = pd.to_numeric(result["数值"], errors="coerce")
     required = ["公司", "指标编码", "指标名称", "报告期", "数值"]
-    result = result.dropna(subset=["数值"])
+    unavailable_chart_codes = {
+        "POLICY_SURPLUS_CORE_TO_CORE_CAPITAL",
+        "POLICY_SURPLUS_TO_INSURANCE_LIABILITIES",
+    }
+    preserve_unavailable = (
+        result["指标编码"].isin(unavailable_chart_codes)
+        & result["披露状态"].fillna("").astype(str).str.strip().eq("无法计算")
+    )
+    result = result[result["数值"].notna() | preserve_unavailable].copy()
     for column in required[:-1]:
         result = result[result[column] != ""]
     result = visualization_metric_frame(result)
@@ -385,9 +398,14 @@ def build_comparison_chart(
     ]
     legend_domain: list[str] = []
     legend_range: list[str] = []
+    default_palette = (
+        KPMG_BRIGHT_CHART_COLORS
+        if chart_type in {"簇状柱状图", "横向条形图"}
+        else KPMG_DEFAULT_COLORS
+    )
     for index, item in enumerate(dict.fromkeys(chart_data[legend_source].astype(str))):
         legend_domain.append(rename_map.get(item, item))
-        legend_range.append(color_map.get(item, KPMG_DEFAULT_COLORS[index % len(KPMG_DEFAULT_COLORS)]))
+        legend_range.append(color_map.get(item, default_palette[index % len(default_palette)]))
     base = alt.Chart(chart_data).encode(
         color=alt.Color(
             "图例项:N",
@@ -409,6 +427,7 @@ def build_comparison_chart(
             ),
         )
         labels = alt.Chart(chart_data).mark_text(
+            tooltip=False,
             dy=-7,
             align="center",
             baseline="bottom",
@@ -434,6 +453,7 @@ def build_comparison_chart(
             ),
         )
         labels = alt.Chart(chart_data).mark_text(
+            tooltip=False,
             dx=7,
             align="left",
             baseline="middle",
@@ -460,6 +480,7 @@ def build_comparison_chart(
             shape=alt.value("circle"),
         )
         labels = alt.Chart(chart_data).mark_text(
+            tooltip=False,
             dy=-12,
             fontSize=11,
             fontWeight="bold",
@@ -512,6 +533,7 @@ def build_comparison_chart(
                     label_rows = chart_data[chart_data["_标签偏移"].eq(dy)]
                     label_layers.append(
                         alt.Chart(label_rows).mark_text(
+                            tooltip=False,
                             dy=int(dy),
                             baseline="bottom" if dy < 0 else "top",
                             fontSize=10,
@@ -530,6 +552,7 @@ def build_comparison_chart(
                 chart = alt.layer(line, points, *label_layers)
             else:
                 labels = alt.Chart(chart_data).mark_text(
+                    tooltip=False,
                     dy=-12,
                     fontSize=11,
                     fontWeight="bold",

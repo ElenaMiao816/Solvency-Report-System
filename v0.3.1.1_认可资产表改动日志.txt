@@ -1,0 +1,157 @@
+认可资产表（S03）接入改动日志
+========================================
+目标：以“幸福人寿26Q1”为例，在 STEP2 智能页码定位中，新增“S03-认可资产表”的页码定位，
+并在 STEP3 提取/标准化、STEP4 校验、STEP5 导航、STEP7 图表等后续环节接入对应操作。
+
+一、配置文件
+1. config/solvency_page_features.json
+   - 新增 table_id=RECOGNIZED_ASSETS 目标表：
+     table_name="S03-认可资产表"、strategy_id="life_solvency.recognized_assets.v1"、
+     canonical_headers=["行次","项目","账面价值","非认可价值","认可价值"]、
+     postprocess_actions=["normalize_recognized_assets_total","trim_adjacent_rows"]、
+     completeness_source_item_recall_ratio=1.0。
+
+2. config/report_profiles/LIFE_SOLVENCY.json
+   - 新增 locator.instructions 中“认可资产表”定位说明。
+   - 新增 layout_variant：RECOGNIZED_ASSETS_STANDARD。
+   - 新增 completeness_rule：RECOGNIZED_ASSETS_REQUIRED。
+
+3. config/report_profiles/LIFE_SOLVENCY_profile_v2.xlsx
+   - 由 LIFE_SOLVENCY.json 重新生成静态工作簿（含新增的“认可资产表”目标表、版式变体、完整性规则）。
+
+二、services/（服务层）
+4. services/table_strategy_handlers.py
+   - make_postprocess_handler 新增 normalize_recognized_assets_total 参数，实现“认可资产合计”别名清理。
+   - 新增 RECOGNIZED_ASSETS_PROMPT_HANDLER / BOUNDARY_HANDLER / POSTPROCESS_HANDLER / COMPLETENESS_HANDLER。
+
+5. services/table_strategy_registry.py
+   - 注册 STRATEGY_RECOGNIZED_ASSETS="life_solvency.recognized_assets.v1"，
+     绑定 table_id="RECOGNIZED_ASSETS" 并设为默认策略。
+
+6. services/solvency_table_boundaries.py
+   - 修复 enforce_output_boundaries：保留多级表头行（原实现只保留第一行，破坏多级表头识别）。
+   - TABLE_ITEM_BOUNDARIES / TABLE_CANONICAL_HEADERS 新增 RECOGNIZED_ASSETS 边界与规范表头。
+
+7. services/solvency_table_extractor.py
+   - TABLE_EXCLUSIONS / TABLE_HEADERS / TABLE_START_MARKERS / TABLE_END_MARKERS 新增认可资产表相关词条
+     （排除“认可负债表”“最低资本表”，结束标记含“S04”“S05”等）。
+
+8. services/solvency_ai_table_extractor.py
+   - TABLE_COMPLETENESS_TERMS / AI_TABLE_END_MARKERS 新增 RECOGNIZED_ASSETS 词条。
+   - _source_completeness_profile_core 增加 RECOGNIZED_ASSETS 分支（canonical_item="认可资产合计"）。
+
+9. services/solvency_normalizer.py
+   - TABLE_ALLOWED_CODES 新增 RECOGNIZED_ASSETS={RECOGNIZED_ASSETS,CASH_LIQUID_ASSETS,INVESTMENT_ASSETS,REINSURANCE_ASSETS}。
+   - 新增 _recognized_assets_subcolumn 辅助函数；对 RECOGNIZED_ASSETS 表在列循环中跳过
+     “账面价值”“非认可价值”子列，仅捕获“认可价值”列（解决两级表头 期末数/期初数 × 账面/非认可/认可 的重复取值问题）。
+
+10. services/solvency_validator.py
+    - 新增 EXTRA_VALIDATION_RULES["DUPLICATE_RECOGNIZED_ASSETS"]（认可资产跨表一致性，适用期间 本季度末数|期末数|本季度（末）数，容差 1 万元）。
+    - RULE_METRICS 增加对应指标 RECOGNIZED_ASSETS，并加入派发集合。
+
+11. services/solvency_validation_workbook.py
+    - FORMULA_DESCRIPTIONS 新增 DUPLICATE_RECOGNIZED_ASSETS 公式描述。
+
+12. services/solvency_navigation.py
+    - 新增 RECOGNIZED_ASSETS_LEVEL="认可资产数据对比" 一级模块，并加入 COMPANY_FIRST_LEVELS。
+    - 新增 NavigationEntry（资产构成情况 / 认可资产构成 / CASH_LIQUID_ASSETS·INVESTMENT_ASSETS·REINSURANCE_ASSETS）。
+
+13. services/solvency_step7_chart_plans.py
+    - 新增“认可资产构成” ChartPlan（COMPONENT_STACK 堆叠图）。
+
+14. step7_solvency.py
+    - COMPONENT_STACK_SPECS / COMPONENT_STACK_DENOMINATOR_CODES 新增“认可资产构成”：
+      三个系列 CASH_LIQUID_ASSETS / INVESTMENT_ASSETS / REINSURANCE_ASSETS，分母 RECOGNIZED_ASSETS；
+      并新增说明文字分支。
+
+三、tests/（测试更新）
+15. tests/test_report_profiles.py —— 目标表 5→6、版式变体 12→13、完整性规则 5→6，
+    新增 RECOGNIZED_ASSETS 的 postprocess_actions / canonical_headers 断言，taxonomy 55→82、company 76→92。
+16. tests/test_table_strategy_registry.py —— 新增 STRATEGY_RECOGNIZED_ASSETS 断言，注册数 6→7。
+17. tests/test_solvency_navigation.py —— 新增 RECOGNIZED_ASSETS_LEVEL 与“认可资产构成”图表/metric_codes 断言。
+18. tests/test_solvency_normalizer.py —— 新增两级表头仅捕获“认可价值”列的测试。
+19. tests/test_step4_validator.py —— 新增 DUPLICATE_RECOGNIZED_ASSETS 跨表一致性测试。
+
+四、测试结果
+   - 全量测试（排除 2 个与本改动无关、因 streamlit.components.v2 版本差异导致的采集错误文件）：
+     245 passed, 0 failed。
+
+五、说明
+   - 本改动仅新增一张目标表及其后续链路，不改动既有 5 张表的定位/提取/校验逻辑。
+   - 认可资产表为两级表头（期末数/期初数 × 账面价值/非认可价值/认可价值），
+     指标口径采用“认可价值”列，故在标准化时跳过“账面价值”“非认可价值”子列。
+   - 校验采用 DUPLICATE_RECOGNIZED_ASSETS（主要指标表认可资产 == S03 认可资产表合计），
+     而非分量求和规则（认可资产表含 9 个分量，仅 3 个有指标编码）。
+
+六、后续修复（v0.3.1.1 提取召回率 + 实时日志）
+20. 修复 S03 认可资产表提取召回率不足（"项目行召回率不足：89%"）。
+   - 根因：services/solvency_ai_table_extractor.py 的 _source_item_labels() 用
+     number_matches[-2] 定位第一个数值列，默认每行只有 2 个数值列；而 S03 是
+     两级表头（期末/期初 × 账面价值/非认可价值/认可价值），每行 6 个数值列，
+     导致"合计"标签粘连前 4 个数值（合计16110395.30416596.38...），无法与输出
+     的"认可资产合计"匹配。此问题在 Python 侧的召回校验逻辑，不在 AI 提取 prompt。
+   - 修复：新增 is_leading_row_number 判断——仅当行首数字后紧跟中文/字母时才视为
+     "行次"，从而锚定到第一个数值列；否则第一个数字即为数值。同时用 \.?\s* 兼容
+     "1 现金"、"5.营销员"、"6.5 其他渠道" 等行次写法，并排除纯数值续行。
+
+21. 修复提取与重试日志中 S03 状态非实时显示。
+   - 根因：并行提取（ThreadPoolExecutor）时，子线程递归调用 extract_tables_hybrid
+     传 progress_callback=None，逐页日志只在最后一次性汇总，无法实时刷新。
+   - 修复：
+     services/solvency_hybrid_pipeline.py 并行分支改传 progress_callback=progress_callback，
+     并删除父层完成后的重复刷日志循环；
+     app.py 的 report_progress 增加 Lock + add_script_run_ctx，使工作线程的
+     st.dataframe 刷新实时生效且不打断提取。
+
+22. 测试更新：
+   - tests/test_accuracy_hardening.py 新增 test_recognized_assets_labels_do_not_glue_value_columns
+     与 test_recognized_assets_recall_matches_canonical_total，锁定"6 数值列不粘合"
+     与"合计 → 认可资产合计 召回 100%"两个场景。
+   - 全量测试（排除 2 个 streamlit.components.v2 版本差异采集错误文件）：247 passed, 0 failed。
+
+七、v2 认可价值口径 + 分量指标补齐（单独存为一个策略版本）
+23. S03 认可资产表改为只提取「认可价值」口径，输出单级表头「行次/项目/期末数/期初数」（期末数在前、期初数在后）。
+   - config/solvency_page_features.json 中 RECOGNIZED_ASSETS 条目的 strategy_id 改为
+     life_solvency.recognized_assets.v2；canonical_headers 改为 ["行次","项目","期末数","期初数"]；
+     prompt_full_table_note / prompt_single_page_note 改写为「只取认可价值、表头期末数/期初数」；
+     postprocess_actions 增加 simplify_recognized_assets_columns。
+   - services/table_strategy_handlers.py 新增 _simplify_recognized_assets_columns 动作与
+     RECOGNIZED_ASSETS_V2_* 处理器：若 AI 仍返回两级表头（账面价值/非认可价值/认可价值），
+     前向填充一级表头、仅保留「认可价值」列，并按期末数/期初数重排为单级表头。
+   - services/table_strategy_registry.py 注册 life_solvency.recognized_assets.v2 并设为默认，
+     v1 保留（default=False）以回退。
+   - services/solvency_table_boundaries.py 的 TABLE_CANONICAL_HEADERS["RECOGNIZED_ASSETS"]
+     同步改为 ("行次","项目","期末数","期初数")。
+
+24. 系统默认目标表补齐 S03 除「合计」外的 9 个分量指标（已在的 3 个不重复添加）。
+   - config/solvency_taxonomy.xlsx（"指标字典" sheet）新增 6 个分量（82 → 88 条）：
+     SUBSIDIARY_JV_ASSOCIATE_EQUITY（在子公司合营企业和联营企业中的权益）、
+     RECEIVABLES_AND_PREPAYMENTS（应收及预付款项）、FIXED_ASSETS（固定资产）、
+     LAND_USE_RIGHTS（土地使用权）、SEPARATE_ACCOUNT_ASSETS（独立账户资产）、
+     OTHER_RECOGNIZED_ASSETS（其他认可资产）。
+     字段沿用既有分量模板：一级模块="认可资产"、二级模块="资产构成"、标准单位="万元"、
+     数据类型="金额"、核心指标="否"、允许期间口径="期末数|期初数"、
+     别名="{指标名称}认可价值"、STEP5宽表映射="是"。
+   - services/solvency_normalizer.py 的 TABLE_ALLOWED_CODES["RECOGNIZED_ASSETS"] 追加上述 6 个编码。
+
+25. 重新生成静态工作簿 config/report_profiles/LIFE_SOLVENCY_profile_v2.xlsx（字段字典 82 → 88 条）。
+
+26. 测试更新：
+   - tests/test_table_strategy_registry.py：注册策略数 7 → 8；新增 v1 回退、v2 默认、
+     _simplify_recognized_assets_columns 单级化简、两级表头化简为认可价值、v2 postprocess 合计标准化断言。
+   - tests/test_report_profiles.py：RECOGNIZED_ASSETS 的 postprocess_actions/canonical_headers 改为 v2；
+     taxonomy_frame 82 → 88。
+   - tests/test_solvency_normalizer.py：新增 6 个新编码进入白名单并可被 resolve_metric_match 匹配的断言。
+   - 全量测试（排除 2 个 streamlit.components.v2 版本差异采集错误文件）：253 passed, 0 failed。
+
+27. 下游展示（STEP6-8 可显示指标）补齐 6 个新分量：
+   - services/solvency_navigation.py：NavigationEntry「认可资产构成」的 metric_codes 由 3 个扩为 9 个
+     （现金及流动性管理工具、投资资产、在子公司合营企业和联营企业中的权益、再保险资产、
+     应收及预付款项、固定资产、土地使用权、独立账户资产、其他认可资产）。
+   - step7_solvency.py：COMPONENT_STACK_SPECS["认可资产构成"] 由 3 系列扩为 9 系列（按报告行次顺序配色），
+     并更新图注说明文字为九类资产。
+   - services/solvency_step7_chart_plans.py：ChartPlan 说明更新为九类资产。
+   - STEP6 自定义分析为数据驱动（metric_options 直接取自标准化数据），6 个新分量随提取结果自动可显示；
+     STEP8 报告视图经 navigation 的 metric_codes 判定可用性，同样自动覆盖。
+   - tests/test_solvency_navigation.py：metric_codes_for_chart("认可资产构成") 断言由 3 个扩为 9 个。
+   - 全量测试（排除 2 个 streamlit.components.v2 版本差异采集错误文件）：253 passed, 0 failed。

@@ -20,6 +20,7 @@ from services.solvency_hybrid_pipeline import (
     _extract_one_page,
     _locate_scan_directory_with_vision,
     _locator_conflict,
+    _locator_page_excerpt,
     _validate_cross_page_columns,
 )
 from services.solvency_normalizer import resolve_metric_match
@@ -85,7 +86,7 @@ class DirectoryLocatorTests(unittest.TestCase):
 
 
 class LocatorConflictTests(unittest.TestCase):
-    def test_closed_boundary_disagreement_is_isolated(self):
+    def test_closed_boundary_contained_in_broader_semantic_range_is_accepted(self):
         required, reason = _locator_conflict(
             local_pages=[8],
             ai_pages=[8, 9],
@@ -93,8 +94,30 @@ class LocatorConflictTests(unittest.TestCase):
             directory_pages=[8],
             boundary_closed=True,
         )
+        self.assertFalse(required)
+        self.assertEqual(reason, "")
+
+    def test_closed_boundary_disjoint_semantic_range_is_isolated(self):
+        required, reason = _locator_conflict(
+            local_pages=[24],
+            ai_pages=[21, 22, 23],
+            visual_pages=[],
+            directory_pages=[24],
+            boundary_closed=True,
+        )
         self.assertTrue(required)
-        self.assertIn("不一致", reason)
+        self.assertIn("无交集", reason)
+
+    def test_closed_boundary_ignores_stale_directory_offset(self):
+        required, reason = _locator_conflict(
+            local_pages=[24],
+            ai_pages=[21, 22, 23, 24],
+            visual_pages=[],
+            directory_pages=[19],
+            boundary_closed=True,
+        )
+        self.assertFalse(required)
+        self.assertEqual(reason, "")
 
     def test_consistent_sources_do_not_require_review(self):
         required, reason = _locator_conflict(
@@ -117,6 +140,16 @@ class LocatorConflictTests(unittest.TestCase):
         )
         self.assertTrue(required)
         self.assertIn("仅有目录候选", reason)
+
+    def test_locator_excerpt_keeps_page_title_and_terminal_rows(self):
+        excerpt = _locator_page_excerpt(
+            "页面标题 " + "中间内容" * 700 + " 实际资本合计",
+            max_characters=120,
+        )
+
+        self.assertIn("页面标题", excerpt)
+        self.assertIn("实际资本合计", excerpt)
+        self.assertIn("页面中部省略", excerpt)
 
 
 class CompletenessTests(unittest.TestCase):
@@ -204,6 +237,48 @@ class CompletenessTests(unittest.TestCase):
 
         self.assertEqual(expected_rows, 4)
         self.assertNotIn("报告数据披露根据", "".join(labels))
+        self.assertEqual(recall, 1.0)
+        self.assertEqual(missing, ())
+
+    def test_recognized_assets_labels_do_not_glue_value_columns(self):
+        grid = PageGrid(
+            1,
+            "\n".join([
+                "001|行次 项目 账面价值 非认可价值 认可价值 账面价值 非认可价值 认可价值",
+                "002|1 现金及流动性管理工具 80 72 80 72 80 72",
+                "003|2 投资资产 800 720 800 720 800 720",
+                "004|3 再保险资产 20 18 20 18 20 18",
+                "005|合计 900 810 900 810 900 810",
+            ]),
+            20,
+        )
+        labels = _source_item_labels("RECOGNIZED_ASSETS", [grid])
+        self.assertEqual(
+            labels,
+            ("现金及流动性管理工具", "投资资产", "再保险资产", "合计"),
+        )
+
+    def test_recognized_assets_recall_matches_canonical_total(self):
+        grid = PageGrid(
+            1,
+            "\n".join([
+                "001|行次 项目 账面价值 非认可价值 认可价值",
+                "002|1 现金及流动性管理工具 80 72 80",
+                "003|2 投资资产 800 720 800",
+                "004|3 再保险资产 20 18 20",
+                "005|合计 900 810 900",
+            ]),
+            20,
+        )
+        labels = _source_item_labels("RECOGNIZED_ASSETS", [grid])
+        rows = [
+            ["行次", "项目", "账面价值", "非认可价值", "认可价值"],
+            ["1", "现金及流动性管理工具", "80", "72", "80"],
+            ["2", "投资资产", "800", "720", "800"],
+            ["3", "再保险资产", "20", "18", "20"],
+            ["4", "认可资产合计", "900", "810", "900"],
+        ]
+        recall, missing = _item_recall_profile(rows, labels)
         self.assertEqual(recall, 1.0)
         self.assertEqual(missing, ())
 

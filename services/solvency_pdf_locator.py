@@ -47,6 +47,41 @@ def extract_page_texts(pdf_bytes: bytes) -> list[str]:
         ]
 
 
+POLICY_SURPLUS_SOURCE_LABELS = {
+    "POLICY_SURPLUS_CORE_T1": "计入核心一级资本的保单未来盈余",
+    "POLICY_SURPLUS_CORE_T2": "计入核心二级资本的保单未来盈余",
+    "POLICY_SURPLUS_ANC_T1": "计入附属一级资本的保单未来盈余",
+    "POLICY_SURPLUS_ANC_T2": "计入附属二级资本的保单未来盈余",
+}
+
+
+def visible_policy_surplus_codes(
+    pdf_bytes: bytes, pages: Iterable[int] | None = None,
+) -> frozenset[str] | None:
+    """Return independently visible source rows, or None for unreadable text."""
+    try:
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            selected = pages if pages is not None else range(1, len(pdf.pages) + 1)
+            text = "".join(
+                pdf.pages[page - 1].extract_text(layout=True, x_tolerance=2, y_tolerance=3) or ""
+                for page in selected if 1 <= page <= len(pdf.pages)
+            )
+    except (OSError, ValueError):
+        return None
+    compact = _compact(text)
+    visible = frozenset(
+        code for code, label in POLICY_SURPLUS_SOURCE_LABELS.items()
+        if label in compact
+    )
+    if visible:
+        return visible
+    # A readable capital table with no policy-surplus subrow is affirmative
+    # non-disclosure; a scanned or garbled text layer remains inconclusive.
+    if "实际资本合计" in compact and "核心一级资本" in compact:
+        return frozenset()
+    return None
+
+
 def _compact(text: str) -> str:
     return re.sub(r"\s+", "", text or "")
 
@@ -672,6 +707,13 @@ def extract_report_metadata(pdf_bytes: bytes) -> dict:
         r"年第季度(20\d{2})([1-4])",
         cover_compact,
     )
+    # Layout extraction may emit the cover as "年第一季度2025" even when the
+    # rendered page reads "2025 年第一季度". Do not fall back to the insurer's
+    # establishment year on page two in that case.
+    reversed_cover_period_match = re.search(
+        r"年(?:第)?([一二三四1234])季度(20\d{2})(?!\d)",
+        cover_compact,
+    )
     # Some embedded cover fonts decode the Chinese caption as mojibake while
     # leaving the year and quarter digits readable and adjacent (for example
     # "...20261"). Keep this fallback deliberately limited to the cover tail.
@@ -679,25 +721,28 @@ def extract_report_metadata(pdf_bytes: bytes) -> dict:
         r"(?<!\d)(20\d{2})([1-4])$",
         cover_compact,
     )
-    report_period_match = (
-        cover_period_match
-        or split_period_match
-        or compact_digit_period_match
-    )
+    report_period_match = cover_period_match or split_period_match or compact_digit_period_match
     year_match = re.search(r"(20\d{2})年", compact)
     quarter_match = re.search(r"第?([一二三四1234])季度", compact)
     quarter_map = {"一": "Q1", "1": "Q1", "二": "Q2", "2": "Q2", "三": "Q3", "3": "Q3", "四": "Q4", "4": "Q4"}
-    company_match = re.search(r"([^\n]{2,40}(?:保险股份有限公司|保险有限公司))", page_texts[0] if page_texts else "")
-    date_match = re.search(r"(20\d{2})年(\d{1,2})月(\d{1,2})日", compact)
+    company_match = re.search(
+        r"([^\n]{2,40}(?:保险股份有限公司|保险有限责任公司|保险有限公司))",
+        page_texts[0] if page_texts else "",
+    )
+    date_pattern = r"(20\d{2})年(\d{1,2})月(\d{1,2})日"
+    date_match = re.search(date_pattern, cover_compact) or re.search(
+        rf"(?:披露日期|发布日期|公告日期|出具日期)[:：]?{date_pattern}", compact
+    )
 
-    year = int(report_period_match.group(1)) if report_period_match else (
-        int(year_match.group(1)) if year_match else None
-    )
-    quarter_symbol = (
-        report_period_match.group(2)
-        if report_period_match
-        else (quarter_match.group(1) if quarter_match else "")
-    )
+    if report_period_match:
+        year, quarter_symbol = int(report_period_match.group(1)), report_period_match.group(2)
+    elif reversed_cover_period_match:
+        year, quarter_symbol = (
+            int(reversed_cover_period_match.group(2)), reversed_cover_period_match.group(1)
+        )
+    else:
+        year = int(year_match.group(1)) if year_match else None
+        quarter_symbol = quarter_match.group(1) if quarter_match else ""
     quarter = quarter_map.get(quarter_symbol)
     return {
         "公司": company_match.group(1).strip() if company_match else "",
