@@ -34,6 +34,7 @@ TABLE_EXCLUSIONS = {
         "签单保费占前五位的产品",
     ),
     "ACTUAL_CAPITAL": ("认可资产表", "认可负债表", "最低资本表"),
+    "RECOGNIZED_ASSETS": ("认可负债表", "最低资本表"),
     "THREE_YEAR_INVESTMENT_RETURN": ("流动性覆盖率", "最低资本表"),
     "MINIMUM_CAPITAL": ("认可资产表", "认可负债表"),
 }
@@ -46,6 +47,10 @@ TABLE_HEADERS = {
     ),
     "OPERATING_METRICS": ("指标名称", "本季度", "本年累计"),
     "ACTUAL_CAPITAL": ("行次", "期末数", "期初数"),
+    "RECOGNIZED_ASSETS": (
+        "行次", "项目", "期末数", "期初数",
+        "账面价值", "非认可价值", "认可价值",
+    ),
     "THREE_YEAR_INVESTMENT_RETURN": ("投资收益率", "近三年"),
     "MINIMUM_CAPITAL": ("行次", "期末数", "期初数"),
 }
@@ -65,6 +70,15 @@ TABLE_START_MARKERS = {
     "THREE_YEAR_INVESTMENT_RETURN": (
         "近三年（综合）投资收益率",
         "近三年平均投资收益率",
+    ),
+    "RECOGNIZED_ASSETS": (
+        "认可资产表",
+        "S03-认可资产表",
+        "S03认可资产表",
+        "认可资产明细表",
+        "现金及流动性管理工具",
+        "投资资产",
+        "再保险资产",
     ),
     "MINIMUM_CAPITAL": (
         "最低资本表",
@@ -87,6 +101,7 @@ TABLE_END_MARKERS = {
         "最低资本表",
     ),
     "THREE_YEAR_INVESTMENT_RETURN": ("实际资本表", "认可资产表", "最低资本表"),
+    "RECOGNIZED_ASSETS": ("认可负债表", "S04", "S05", "最低资本表"),
     "MINIMUM_CAPITAL": (),
 }
 
@@ -142,6 +157,7 @@ class ExtractedTable:
     source_pages: list[int] = field(default_factory=list)
     unit_records: list[UnitRecord] = field(default_factory=list)
     profile_strategy_id: str = ""
+    metric_records: list[dict] = field(default_factory=list)
 
     @property
     def candidate_id(self) -> str:

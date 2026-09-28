@@ -12,17 +12,17 @@ from dashboard_components import (
     company_detail_rows,
     render_industry_overview,
     render_major_financing,
-    render_peer_classification,
     render_report_analysis,
     render_report_back_cover,
     render_report_cover,
     render_report_footnote,
     render_report_notes_editor,
 )
+from services.solvency_company_identity import display_company_names
 from services.solvency_navigation import (
     INDUSTRY_NAVIGATION,
     INDUSTRY_QUANT_CHART,
-    KPMG_DEFAULT_COLORS,
+    KPMG_BRIGHT_SERIES_COLORS,
     OVERVIEW_LEVEL,
     PRINT_ALL_LABEL,
     metric_codes_for_chart,
@@ -43,7 +43,6 @@ REGULATORY_LIMITS = {
 PICTURE_DIR = Path(__file__).resolve().parent / "picture"
 SUPPLEMENTAL_SECTIONS = (
     "行业整体偿付能力概览",
-    "调研公司分类列表",
     "重大融资信息统计",
 )
 PEER_GROUP_COLUMN = "同业分类"
@@ -88,7 +87,7 @@ def _default_peer_group_styles(
     """Return stable system labels and KPMG colors for peer-group charts."""
     ordered = list(peer_groups)
     colors = {
-        peer_group: KPMG_DEFAULT_COLORS[index % len(KPMG_DEFAULT_COLORS)]
+        peer_group: KPMG_BRIGHT_SERIES_COLORS[index % len(KPMG_BRIGHT_SERIES_COLORS)]
         for index, peer_group in enumerate(ordered)
     }
     labels = {peer_group: peer_group for peer_group in ordered}
@@ -589,7 +588,7 @@ def show_step_8_solvency(
         st.info("请先在 Step5 确认多公司集成数据。")
         return
     industry_totals = _industry_total_rows(data)
-    frame = company_detail_rows(data).copy()
+    frame = display_company_names(company_detail_rows(data))
     if frame.empty:
         st.info("当前数据没有公司明细记录。")
         return
@@ -697,8 +696,6 @@ def show_step_8_solvency(
             render_report_analysis(notes.get(section_name, {}))
             if section_name == "行业整体偿付能力概览":
                 render_industry_overview(scoped)
-            elif section_name == "调研公司分类列表":
-                render_peer_classification(scoped)
             else:
                 financing_view = financing_data
                 if isinstance(financing_view, pd.DataFrame) and not financing_view.empty:

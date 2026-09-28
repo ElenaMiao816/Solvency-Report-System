@@ -2,19 +2,17 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
-from unittest.mock import patch
-
 import pandas as pd
 
 from dashboard_components import (
-    PEER_CLASSIFICATION_STANDARD,
+    _format_key_solvency_overview_display,
     build_dashboard_header_html,
     build_report_back_cover_html,
     build_report_cover_html,
-    build_peer_classification_table,
+    build_key_solvency_overview_html,
+    build_key_solvency_overview_table,
     calculate_industry_overview,
     profile_platform_copy,
-    render_peer_classification,
 )
 
 
@@ -51,6 +49,224 @@ def dashboard_rows() -> pd.DataFrame:
 
 
 class DashboardComponentTests(unittest.TestCase):
+    def test_key_solvency_overview_uses_prior_year_matching_period_and_keeps_missing_blank(self):
+        rows = []
+        values_by_period = {
+            "2024Q4": {
+                "CORE_SOLVENCY_RATIO": 120.0,
+                "COMBINED_SOLVENCY_RATIO": 180.0,
+                "ACTUAL_CAPITAL": 100.0,
+                "MINIMUM_CAPITAL": 60.0,
+                "RECOGNIZED_LIABILITIES": 300.0,
+                "POLICY_SURPLUS_CORE_T1": 10.0,
+                "POLICY_SURPLUS_CORE_T2": 2.0,
+                "POLICY_SURPLUS_ANC_T1": 1.0,
+                "POLICY_SURPLUS_ANC_T2": 1.0,
+            },
+            "2025Q4": {
+                "CORE_SOLVENCY_RATIO": 130.0,
+                "COMBINED_SOLVENCY_RATIO": 195.0,
+                "ACTUAL_CAPITAL": 110.0,
+                "MINIMUM_CAPITAL": 66.0,
+                "RECOGNIZED_LIABILITIES": 330.0,
+                "POLICY_SURPLUS_CORE_T1": 11.0,
+                "POLICY_SURPLUS_CORE_T2": 2.2,
+                "POLICY_SURPLUS_ANC_T1": 1.1,
+                "POLICY_SURPLUS_ANC_T2": 1.1,
+                "POLICY_SURPLUS_CORE_TO_CORE_CAPITAL": 0.40,
+                "MARKET_RISK_TO_QUANT_CAPITAL": 0.25,
+                "LIFE_INSURANCE_RISK_TO_QUANT_CAPITAL": 0.30,
+            },
+            "2025Q2": {
+                "CORE_SOLVENCY_RATIO": 999.0,
+                "ACTUAL_CAPITAL": 999.0,
+            },
+        }
+        for period, metrics in values_by_period.items():
+            for code, value in metrics.items():
+                rows.append({
+                    "公司": "甲人寿",
+                    "公司类型": "寿险",
+                    "公司统一编码": "A",
+                    "同业分类": "大型公司",
+                    "报告期": period,
+                    "期间口径": "期末数",
+                    "指标编码": code,
+                    "数值": value,
+                })
+        table, latest, prior = build_key_solvency_overview_table(pd.DataFrame(rows))
+        self.assertEqual((latest, prior), ("2025Q4", "2024Q4"))
+        self.assertEqual(
+            table.columns.tolist(),
+            [
+                "公司名称",
+                "核心资本充足率2025Q4",
+                "核心资本充足率2024Q4",
+                "综合资本充足率2025Q4",
+                "综合资本充足率2024Q4",
+                "实际资本2025Q4",
+                "实际资本2024Q4",
+                "保单未来盈余2025Q4",
+                "保单未来盈余2024Q4",
+                "保单未来盈余/核心资本比例 2025Q4",
+                "市场风险占比 2025Q4",
+                "保险风险占比 2025Q4",
+                "认可负债余额2025Q4",
+                "认可负债余额2024Q4",
+            ],
+        )
+        self.assertAlmostEqual(table.iloc[0, 1], 130.0)
+        self.assertAlmostEqual(table.iloc[0, 2], 120.0)
+        self.assertAlmostEqual(table.iloc[0, 5], 110.0)
+        self.assertAlmostEqual(table.iloc[0, 7], 15.4)
+        self.assertAlmostEqual(table.iloc[0, 8], 14.0)
+        self.assertAlmostEqual(table.iloc[0, 9], 0.40)
+        self.assertAlmostEqual(table.iloc[0, 10], 0.25)
+        self.assertAlmostEqual(table.iloc[0, 11], 0.30)
+        self.assertAlmostEqual(table.iloc[0, 12], 330.0)
+        self.assertAlmostEqual(table.iloc[0, 13], 300.0)
+
+    def test_key_overview_has_no_duplicate_internal_heading(self):
+        source = (ROOT / "dashboard_components.py").read_text(encoding="utf-8")
+        self.assertNotIn('st.markdown("### :material/table_chart: 关键偿付数据概览")', source)
+
+    def test_key_solvency_overview_sums_available_policy_surplus_layers(self):
+        rows = []
+        values_by_company = {
+            "仅核心一级": {
+                "POLICY_SURPLUS_CORE_T1": 337_959.0,
+            },
+            "披露三层": {
+                "POLICY_SURPLUS_CORE_T1": 263_219.16,
+                "POLICY_SURPLUS_CORE_T2": 8_163.89,
+                "POLICY_SURPLUS_ANC_T1": 354_759.48,
+            },
+        }
+        for company, policy_values in values_by_company.items():
+            for period in ("2025Q2", "2026Q2"):
+                metrics = {
+                    "CORE_SOLVENCY_RATIO": 120.0,
+                    "COMBINED_SOLVENCY_RATIO": 180.0,
+                    "ACTUAL_CAPITAL": 1_000_000.0,
+                    "RECOGNIZED_LIABILITIES": 5_000_000.0,
+                    **policy_values,
+                }
+                for code, metric_value in metrics.items():
+                    rows.append({
+                        "公司": company,
+                        "公司类型": "寿险",
+                        "报告期": period,
+                        "期间口径": "期末数",
+                        "指标编码": code,
+                        "数值": metric_value,
+                    })
+
+        table, latest, prior = build_key_solvency_overview_table(pd.DataFrame(rows))
+
+        self.assertEqual((latest, prior), ("2026Q2", "2025Q2"))
+        by_company = table.set_index("公司名称")
+        self.assertAlmostEqual(by_company.loc["仅核心一级", "保单未来盈余2026Q2"], 337_959.0)
+        self.assertAlmostEqual(by_company.loc["仅核心一级", "保单未来盈余2025Q2"], 337_959.0)
+        expected_three_layers = 263_219.16 + 8_163.89 + 354_759.48
+        self.assertAlmostEqual(by_company.loc["披露三层", "保单未来盈余2026Q2"], expected_three_layers)
+        self.assertAlmostEqual(by_company.loc["披露三层", "保单未来盈余2025Q2"], expected_three_layers)
+
+    def test_key_overview_merges_registered_legal_and_short_names_across_years(self):
+        rows = [
+            {
+                "公司": company,
+                "公司类型": "寿险",
+                "报告期": period,
+                "期间口径": "本季度末数",
+                "指标编码": code,
+                "数值": value,
+            }
+            for company, period, code, value in (
+                ("工银安盛人寿保险有限公司", "2025Q1", "CORE_SOLVENCY_RATIO", 184.0),
+                ("工银安盛", "2026Q1", "CORE_SOLVENCY_RATIO", 128.0),
+                ("工银安盛人寿保险有限公司", "2025Q1", "COMBINED_SOLVENCY_RATIO", 248.0),
+                ("工银安盛", "2026Q1", "COMBINED_SOLVENCY_RATIO", 187.0),
+            )
+        ]
+        table, latest, prior = build_key_solvency_overview_table(pd.DataFrame(rows))
+        self.assertEqual((latest, prior), ("2026Q1", "2025Q1"))
+        self.assertEqual(len(table), 1)
+        self.assertEqual(table.iloc[0]["公司名称"], "工银安盛")
+        self.assertEqual(table.iloc[0]["核心资本充足率2026Q1"], 128.0)
+        self.assertEqual(table.iloc[0]["核心资本充足率2025Q1"], 184.0)
+        self.assertEqual(calculate_industry_overview(pd.DataFrame(rows)).company_count, 1)
+
+    def test_key_solvency_overview_html_matches_annual_table_style(self):
+        display = pd.DataFrame([
+            {
+                "公司名称": "甲人寿<script>",
+                "核心资本充足率2025Q4": "130.0%",
+                "核心资本充足率2024Q4": "120.0%",
+                "市场风险占比 2025Q4": "未披露",
+            },
+            {
+                "公司名称": "乙人寿",
+                "核心资本充足率2025Q4": "128.0%",
+                "核心资本充足率2024Q4": "130.0%",
+                "市场风险占比 2025Q4": "12.0%",
+            },
+        ])
+        result = build_key_solvency_overview_html(
+            display,
+            latest_period="2025Q4",
+            prior_period="2024Q4",
+        )
+        self.assertIn("font-family:sans-serif;font-size:10px", result)
+        self.assertIn("background-color:#00338D;color:white", result)
+        self.assertNotIn(">最新报告期</th>", result)
+        self.assertNotIn(">去年同期</th>", result)
+        self.assertIn("核心资本充足率<br>2025Q4", result)
+        self.assertIn("核心资本充足率<br>2024Q4", result)
+        self.assertNotIn("overflow-x:auto", result)
+        self.assertNotIn("min-width:1850px", result)
+        self.assertIn("<colgroup>", result)
+        self.assertIn("table-layout:fixed", result)
+        self.assertIn("@media print", result)
+        self.assertIn("min-width:0!important", result)
+        self.assertIn("white-space:normal!important", result)
+        self.assertEqual(result.count("<thead><tr"), 1)
+        self.assertIn("background-color:#CDCDCD", result)
+        self.assertIn("background-color:#F8F9FA", result)
+        self.assertIn("white-space:nowrap;word-break:keep-all", result)
+        self.assertIn("甲人寿&lt;script&gt;", result)
+        self.assertNotIn("甲人寿<script>", result)
+
+        tracked = build_key_solvency_overview_html(display, "乙人寿")
+        self.assertIn("background-color:rgba(0,51,141,0.03)", tracked)
+        self.assertIn("border-left:1.5px solid #00338D", tracked)
+        self.assertIn("border-right:1.5px solid #00338D", tracked)
+        self.assertIn("font-weight:bold", tracked)
+
+    def test_key_solvency_overview_formats_rates_and_amounts_by_metric_type(self):
+        table = pd.DataFrame([{
+            "公司名称": "甲人寿",
+            "核心资本充足率2025Q4": 130.0,
+            "综合资本充足率2024Q4": 180.0,
+            "实际资本2025Q4": 110.0,
+            "保单未来盈余/核心资本比例 2025Q4": 0.40,
+            "市场风险占比 2025Q4": 0.25,
+        }])
+        display = _format_key_solvency_overview_display(table)
+        self.assertEqual(display.iloc[0, 1], "130.0%")
+        self.assertEqual(display.iloc[0, 2], "180.0%")
+        self.assertEqual(display.iloc[0, 3], "110.00")
+        self.assertEqual(display.iloc[0, 4], "40.0%")
+        self.assertEqual(display.iloc[0, 5], "25.0%")
+        result = build_key_solvency_overview_html(
+            display,
+            latest_period="2025Q4",
+            prior_period="2024Q4",
+        )
+        self.assertIn("核心资本充足率<br>2025Q4", result)
+        self.assertIn("综合资本充足率<br>2024Q4", result)
+        self.assertIn(">130.0%</td>", result)
+        self.assertIn(">110.00</td>", result)
+
     def test_profile_copy_changes_with_life_nonlife_and_annual_profiles(self):
         self.assertEqual(
             profile_platform_copy("LIFE_SOLVENCY", "寿险偿付能力季度报告", "QUARTERLY"),
@@ -75,25 +291,6 @@ class DashboardComponentTests(unittest.TestCase):
         self.assertEqual(overview.sufficient_count, 1)
         self.assertEqual(overview.warning_count, 1)
         self.assertEqual(overview.insufficient_count, 1)
-
-    def test_peer_classification_table_uses_existing_peer_labels(self):
-        table = build_peer_classification_table(dashboard_rows())
-        self.assertEqual(table.columns.tolist(), ["序号", "大型公司", "中型公司", "养老健康"])
-        self.assertEqual(table.iloc[0]["大型公司"], "甲人寿")
-        self.assertEqual(table.iloc[0]["中型公司"], "乙人寿")
-        self.assertEqual(table.iloc[0]["养老健康"], "丙健康")
-        self.assertIn("5,000 亿元", PEER_CLASSIFICATION_STANDARD)
-
-    def test_peer_classification_renders_full_static_table_without_scrolling(self):
-        with patch("dashboard_components.st") as streamlit:
-            render_peer_classification(dashboard_rows())
-
-        streamlit.table.assert_called_once()
-        _, kwargs = streamlit.table.call_args
-        self.assertEqual(kwargs["height"], "content")
-        self.assertEqual(kwargs["width"], "stretch")
-        self.assertTrue(kwargs["hide_index"])
-        streamlit.dataframe.assert_not_called()
 
     def test_header_html_uses_background_image_and_escapes_dynamic_text(self):
         result = build_dashboard_header_html(
@@ -127,15 +324,44 @@ class DashboardComponentTests(unittest.TestCase):
         self.assertIn("data:image/png;base64,", back)
         self.assertIn("solvency-print-cover--back", back)
 
+    def test_major_financing_heading_omits_sequence_and_period(self):
+        component_source = (ROOT / "dashboard_components.py").read_text(encoding="utf-8")
+        self.assertIn(
+            'st.markdown("### :material/assignment: 重大融资信息统计")',
+            component_source,
+        )
+        self.assertNotIn("02 · 重大融资信息统计 ·", component_source)
+
     def test_print_modes_have_distinct_final_page_rules(self):
         component_source = (ROOT / "dashboard_components.py").read_text(encoding="utf-8")
+        report_source = (ROOT / "step7_solvency.py").read_text(encoding="utf-8")
         self.assertIn("size: A4 portrait; margin: 10mm", component_source)
-        self.assertIn("size: 338.67mm 190.5mm; margin: 8mm 12mm", component_source)
-        self.assertIn("@page :first { margin: 0; }", component_source)
-        self.assertIn("@page :last { margin: 0; }", component_source)
+        self.assertIn("size: 338.67mm 190.5mm; margin: 0", component_source)
+        self.assertIn("导出竖版 A4 PDF</button>", component_source)
+        self.assertIn("竖版 A4 与横版 16:9 均导出封面、正文和封底", component_source)
         self.assertIn("doc.body.appendChild(style)", component_source)
+        self.assertIn('view.dispatchEvent(new view.Event("resize"))', component_source)
+        self.assertIn("await delay(360)", component_source)
+        self.assertIn('[data-stale="true"]', component_source)
+        self.assertIn("waitForStablePage", component_source)
+        self.assertIn("consecutiveStableChecks >= 3", component_source)
+        self.assertIn('doc.querySelector(\'[data-testid="stMain"]\')', component_source)
+        self.assertIn("element.getClientRects().length > 0", component_source)
+        self.assertIn('style.display !== "none"', component_source)
+        self.assertIn('style.visibility !== "hidden"', component_source)
+        self.assertNotIn(
+            'doc.querySelector(\'[data-testid="stElementContainer"][data-stale="true"]\')',
+            component_source,
+        )
+        self.assertIn("view.__solvencyDashboardPrintJob", component_source)
+        self.assertIn("return () => {", component_source)
+        self.assertIn('view.removeEventListener("afterprint", job.afterPrint)', component_source)
         self.assertIn("solvency-print-mode-portrait", component_source)
         self.assertIn("solvency-print-mode-widescreen", component_source)
+        self.assertNotIn(
+            "html.solvency-print-mode-portrait .solvency-print-cover {display:none!important;}",
+            report_source,
+        )
 
     def test_report_pages_do_not_override_selected_paper_size(self):
         for file_name in ("step7_solvency.py", "step8_solvency.py"):

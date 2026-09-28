@@ -28,7 +28,7 @@ def normalize_model_id(base_url: str, model: str) -> str:
     return value
 
 
-def model_request_parameters(base_url: str, model: str) -> dict[str, float]:
+def model_request_parameters(base_url: str, model: str) -> dict[str, object]:
     """Return sampling parameters that are valid for the selected model."""
     canonical_model = normalize_model_id(base_url, model)
     if _is_moonshot_url(base_url) and canonical_model in {
@@ -46,3 +46,15 @@ def model_request_parameters(base_url: str, model: str) -> dict[str, float]:
         # Moonshot apply the correct value for the active thinking mode.
         return {}
     return {"temperature": 0}
+
+
+def vlm_request_parameters(base_url: str, model: str) -> dict[str, object]:
+    """Return provider-safe parameters optimized for deterministic visual extraction."""
+    parameters = dict(model_request_parameters(base_url, model))
+    canonical_model = normalize_model_id(base_url, model)
+    if _is_moonshot_url(base_url) and canonical_model in {
+        "kimi-k2.5",
+        "kimi-k2.6",
+    }:
+        parameters["thinking"] = {"type": "disabled"}
+    return parameters

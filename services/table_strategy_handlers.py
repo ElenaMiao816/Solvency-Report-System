@@ -328,8 +328,12 @@ def _grid_line_has_percent_value(lines: list[str], index: int) -> bool:
         return True
     if index + 1 >= len(lines):
         return False
-    return bool(re.search(
-        r"[-+]?\d[\d,，.]*\s*[％%]",
+    # Only join a genuinely standalone value on the following line.  A
+    # section title such as “近三年（综合）投资收益率” may be followed by the
+    # ordinary-return row; treating any percentage on that row as the title's
+    # value creates a duplicate business row and inflates completeness counts.
+    return bool(re.fullmatch(
+        r"\s*[-+]?\d[\d,，.]*\s*[％%]\s*[。.；;]?\s*",
         _grid_body(lines[index + 1]),
     ))
 
@@ -791,11 +795,125 @@ def _normalize_actual_capital_total_alias(
     return normalized, changed
 
 
+def _normalize_recognized_assets_total_alias(
+    rows: list[list[str]],
+) -> tuple[list[list[str]], bool]:
+    """Standardize the recognized-assets tail “合计” to its canonical name."""
+    normalized = [list(row) for row in rows]
+    changed = False
+    for cells in normalized:
+        if not cells:
+            continue
+        has_row_number = bool(
+            re.fullmatch(r"\d+(?:\.\d+)*\*?", str(cells[0]).strip())
+        )
+        label_index = 1 if has_row_number and len(cells) >= 2 else 0
+        if label_index >= len(cells):
+            continue
+        label = str(cells[label_index]).strip()
+        if re.sub(r"[\s（）()]", "", label) == "合计":
+            cells[label_index] = "认可资产合计"
+            changed = True
+    return normalized, changed
+
+
+def _simplify_recognized_assets_columns(
+    rows: list[list[str]],
+) -> tuple[list[list[str]], bool]:
+    """将认可资产表两级表头化简为单级表头，仅保留“认可价值”列。
+
+    输入（两级表头 期末数/期初数 × 账面价值/非认可价值/认可价值）：
+        ["行次", "项目", "期末数", "", "", "期初数", "", ""],
+        ["", "", "账面价值", "非认可价值", "认可价值", "账面价值", "非认可价值", "认可价值"],
+        ["1", "现金及流动性管理工具", "100", "20", "80", "90", "18", "72"],
+    输出（行次/项目/期末数/期初数，期末数在前）：
+        ["行次", "项目", "期末数", "期初数"],
+        ["1", "现金及流动性管理工具", "80", "72"],
+    """
+    if len(rows) < 3:
+        return [list(row) for row in rows], False
+    second = rows[1]
+    if not any(
+        term in "".join(str(cell) for cell in second)
+        for term in ("账面价值", "非认可", "认可价值")
+    ):
+        return [list(row) for row in rows], False
+
+    normalized = [list(row) for row in rows]
+
+    def _subcolumn(cell: str) -> str:
+        compact = re.sub(r"\s+", "", str(cell or ""))
+        if "非认可" in compact:
+            return "非认可价值"
+        if "认可价值" in compact:
+            return "认可价值"
+        if "账面价值" in compact:
+            return "账面价值"
+        return ""
+
+    def _period(cell: str) -> str:
+        compact = re.sub(r"\s+", "", str(cell or ""))
+        if "期末" in compact:
+            return "期末数"
+        if "期初" in compact:
+            return "期初数"
+        return ""
+
+    # 前向填充一级表头，得到每一列对应的期间（期末数/期初数）。
+    filled_first: list[str] = []
+    last = ""
+    for value in normalized[0]:
+        last = value if value else last
+        filled_first.append(last)
+
+    width = max(len(row) for row in normalized)
+    label_columns: list[int] = []
+    recognized_columns: list[tuple[int, str]] = []  # (列序号, 期间)
+    for col in range(width):
+        sub = _subcolumn(second[col] if col < len(second) else "")
+        if sub == "认可价值":
+            recognized_columns.append(
+                (col, _period(filled_first[col] if col < len(filled_first) else ""))
+            )
+        elif sub in ("账面价值", "非认可价值"):
+            continue
+        else:
+            label_columns.append(col)
+
+    # 认可价值列按 期末数/期初数 排序（期末数在前）。
+    recognized_columns.sort(
+        key=lambda item: {"期末数": 0, "期初数": 1}.get(item[1], 99)
+    )
+
+    label_defaults = ["行次", "项目"]
+    label_headers: list[str] = []
+    for index, col in enumerate(label_columns):
+        value = (filled_first[col] if col < len(filled_first) else "") or ""
+        if value:
+            label_headers.append(value)
+        elif index == 0 and len(label_columns) > 1:
+            label_headers.append("行次")
+        else:
+            label_headers.append("项目")
+    new_header = label_headers + [period for _, period in recognized_columns]
+
+    simplified = [new_header]
+    for row in normalized[2:]:
+        padded = row + [""] * (width - len(row))
+        new_row = [padded[col] for col in label_columns]
+        new_row += [padded[col] for col, _ in recognized_columns]
+        simplified.append(new_row)
+
+    return simplified, True
+
+
 def make_postprocess_handler(
     *,
     normalize_three_year: bool = False,
     recover_minimum_capital: bool = False,
     normalize_actual_capital_total: bool = False,
+    normalize_recognized_assets_total: bool = False,
+    simplify_recognized_assets_columns: bool = False,
 ) -> PostprocessHandler:
     def postprocess(
         request: PostprocessRequest,
@@ -806,6 +924,8 @@ def make_postprocess_handler(
                 ("normalize_three_year_return", normalize_three_year),
                 ("recover_minimum_capital_terminal", recover_minimum_capital),
                 ("normalize_actual_capital_total", normalize_actual_capital_total),
+                ("simplify_recognized_assets_columns", simplify_recognized_assets_columns),
+                ("normalize_recognized_assets_total", normalize_recognized_assets_total),
                 ("trim_adjacent_rows", request.trim_adjacent is not None),
             )
             if enabled
@@ -837,6 +957,18 @@ def make_postprocess_handler(
             if changed:
                 notes.append(
                     "已将实际资本表末行‘5 合计’标准化为‘5 实际资本合计’"
+                )
+        if "simplify_recognized_assets_columns" in actions:
+            rows, changed = _simplify_recognized_assets_columns(rows)
+            if changed:
+                notes.append(
+                    "已将认可资产表两级表头化简为单级表头（行次/项目/期末数/期初数），仅保留认可价值列"
+                )
+        if "normalize_recognized_assets_total" in actions:
+            rows, changed = _normalize_recognized_assets_total_alias(rows)
+            if changed:
+                notes.append(
+                    "已将认可资产表末行‘合计’标准化为‘认可资产合计’"
                 )
         if "trim_adjacent_rows" in actions and request.trim_adjacent:
             rows, note = request.trim_adjacent(request.table_id, rows)
@@ -960,6 +1092,7 @@ SOLVENCY_MAIN_PROMPT_HANDLER = make_prompt_handler(
         "“基本情景下的下季度预测数”子表。统一输出四列："
         "“指标名称、本季度末数、上季度末数、下季度末预测数”。"
         "原文“期末数、期初数、下季度预测数”分别映射到上述后三列。"
+        "原文如有“行次/序号”列，仅用于定位，不得作为输出列；每条数据必须从指标名称开始。"
         "两个子表出现同名项目时必须合并到同一行；仅在预测表出现的“核心资本”等项目"
         "单独保留一行，前两期数值留空。不得在第一张表的“综合偿付能力充足率”处提前停止，"
         "也不得混入随后开始的流动性风险监管指标。"
@@ -968,6 +1101,7 @@ SOLVENCY_MAIN_PROMPT_HANDLER = make_prompt_handler(
         "偿付能力充足率主表与“基本情景下的下季度预测数”均属于本目标。"
         "如本页出现预测子表，必须一并提取，并统一为"
         "“指标名称|本季度末数|上季度末数|下季度末预测数”四列；"
+        "原文“行次/序号”不得输出，每条数据必须从指标名称开始；"
         "同名项目合并，预测表独有项目单列，未披露列留空。"
         "遇到流动性风险监管指标时立即停止。"
     ),
@@ -1187,4 +1321,57 @@ MINIMUM_CAPITAL_POSTPROCESS_HANDLER = make_postprocess_handler(
 )
 MINIMUM_CAPITAL_BOUNDARY_HANDLER = make_boundary_handler(
     require_value_for_boundary_items=True,
+)
+
+RECOGNIZED_ASSETS_PROMPT_HANDLER = make_prompt_handler(
+    full_table_note=(
+        "“S03-认可资产表”列结构为两级表头：第一级为‘期末数/期初数’，"
+        "第二级为‘账面价值/非认可价值/认可价值’。"
+        "必须从‘现金及流动性管理工具’、‘投资资产’、‘再保险资产’等资产明细开始，"
+        "连续提取到末行‘认可资产合计’（原文可能仅写作‘合计’，须保留）。"
+        "随后开始的‘S04-认可负债表’（认可负债、准备金负债、金融负债等）不得混入。"
+        "两级表头必须按原顺序保留，不得把第二级表头当作数据行，也不得合并或删除列。"
+    ),
+    single_page_note=(
+        "本页属于‘S03-认可资产表’（或续页）。"
+        "列结构为‘期末数/期初数’下的‘账面价值/非认可价值/认可价值’两级表头。"
+        "从资产明细行到‘认可资产合计’（或‘合计’）逐行保留；续页不再重复表头时也不得删除数据。"
+        "遇到‘认可负债’等下一张表内容立即停止。"
+    ),
+)
+RECOGNIZED_ASSETS_BOUNDARY_HANDLER = make_boundary_handler()
+RECOGNIZED_ASSETS_POSTPROCESS_HANDLER = make_postprocess_handler(
+    normalize_recognized_assets_total=True,
+)
+RECOGNIZED_ASSETS_COMPLETENESS_HANDLER = make_completeness_handler(
+    source_item_recall_ratio=1.0,
+)
+
+RECOGNIZED_ASSETS_V2_PROMPT_HANDLER = make_prompt_handler(
+    full_table_note=(
+        "“S03-认可资产表”原为两级表头（期末数/期初数 × 账面价值/非认可价值/认可价值）。"
+        "提取时只保留‘认可价值’口径：输出统一为单级表头‘行次/项目/期末数/期初数’"
+        "（期末数在前、期初数在后），其中期末数、期初数分别取对应列的‘认可价值’数值，"
+        "不得输出‘账面价值’‘非认可价值’列。"
+        "按原报告行顺序提取‘现金及流动性管理工具’、‘投资资产’、"
+        "‘在子公司合营企业和联营企业中的权益’、‘再保险资产’、‘应收及预付款项’、"
+        "‘固定资产’、‘土地使用权’、‘独立账户资产’、‘其他认可资产’等资产明细至末行‘合计’。"
+        "末行‘合计’必须保留并将项目名标准化为‘认可资产合计’。"
+        "随后开始的‘S04-认可负债表’（认可负债、准备金负债、金融负债等）不得混入。"
+    ),
+    single_page_note=(
+        "本页属于‘S03-认可资产表’（或续页）。"
+        "原两级表头（期末数/期初数 × 账面价值/非认可价值/认可价值）仅保留‘认可价值’列，"
+        "输出为单级表头‘行次/项目/期末数/期初数’（期末数在前）。"
+        "从资产明细行到‘认可资产合计’（或‘合计’）逐行保留，只取认可价值数值；"
+        "续页不再重复表头时也不得删除数据；遇到‘认可负债’等下一张表内容立即停止。"
+    ),
+)
+RECOGNIZED_ASSETS_V2_BOUNDARY_HANDLER = make_boundary_handler()
+RECOGNIZED_ASSETS_V2_POSTPROCESS_HANDLER = make_postprocess_handler(
+    simplify_recognized_assets_columns=True,
+    normalize_recognized_assets_total=True,
+)
+RECOGNIZED_ASSETS_V2_COMPLETENESS_HANDLER = make_completeness_handler(
+    source_item_recall_ratio=1.0,
 )

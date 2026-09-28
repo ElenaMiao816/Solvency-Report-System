@@ -90,6 +90,23 @@ class UnitExtractionTests(unittest.TestCase):
             "\u3010\u5355\u4f4d\u5907\u6ce8\u3011",
         )
 
+    def test_workbook_can_embed_report_metadata(self):
+        payload = reconstructed_workbook_bytes(
+            AIExtractionBundle([self._table()], []),
+            {
+                "公司": "爱心人寿",
+                "报告年度": 2026,
+                "报告季度": "Q1",
+                "报告期": "2026Q1",
+                "来源文件": "爱心人寿2026Q1.pdf",
+            },
+        )
+        workbook = openpyxl.load_workbook(io.BytesIO(payload), data_only=True)
+        self.assertIn("报告元信息", workbook.sheetnames)
+        metadata = dict(workbook["报告元信息"].iter_rows(min_row=2, values_only=True))
+        self.assertEqual(metadata["公司"], "爱心人寿")
+        self.assertEqual(metadata["报告期"], "2026Q1")
+
     def test_scanned_payload_maps_original_label_unit_to_normalized_row(self):
         rows = [
             ["\u884c\u6b21", "\u9879\u76ee", "\u672c\u5b63\u5ea6\u672b\u6570", "\u4e0a\u5b63\u5ea6\u672b\u6570"],

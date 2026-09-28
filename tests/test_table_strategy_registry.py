@@ -10,12 +10,16 @@ from services.table_strategy_handlers import (
     CompletenessRequest,
     PostprocessRequest,
     PromptRequest,
+    RECOGNIZED_ASSETS_V2_POSTPROCESS_HANDLER,
+    _simplify_recognized_assets_columns,
 )
 from services.table_strategy_registry import (
     GENERIC_GRID_STRATEGY_ID,
     STRATEGY_ACTUAL_CAPITAL,
     STRATEGY_MINIMUM_CAPITAL,
     STRATEGY_OPERATING_METRICS,
+    STRATEGY_RECOGNIZED_ASSETS,
+    STRATEGY_RECOGNIZED_ASSETS_V2,
     STRATEGY_SOLVENCY_MAIN,
     STRATEGY_THREE_YEAR_RETURN,
     StrategyRegistryError,
@@ -25,21 +29,81 @@ from services.table_strategy_registry import (
 
 
 class TableStrategyRegistryTests(unittest.TestCase):
-    def test_existing_five_life_solvency_tables_are_registered(self):
+    def test_existing_life_solvency_tables_are_registered(self):
         expected = {
             "SOLVENCY_MAIN": STRATEGY_SOLVENCY_MAIN,
             "OPERATING_METRICS": STRATEGY_OPERATING_METRICS,
             "ACTUAL_CAPITAL": STRATEGY_ACTUAL_CAPITAL,
             "THREE_YEAR_INVESTMENT_RETURN": STRATEGY_THREE_YEAR_RETURN,
             "MINIMUM_CAPITAL": STRATEGY_MINIMUM_CAPITAL,
+            "RECOGNIZED_ASSETS": STRATEGY_RECOGNIZED_ASSETS_V2,
         }
 
-        self.assertGreaterEqual(len(registered_table_strategies()), 6)
+        self.assertGreaterEqual(len(registered_table_strategies()), 8)
         for table_id, strategy_id in expected.items():
             with self.subTest(table_id=table_id):
                 strategy = resolve_table_strategy(table_id)
                 self.assertEqual(strategy.strategy_id, strategy_id)
                 self.assertEqual(strategy.table_id, table_id)
+
+    def test_recognized_assets_v1_remains_registered_as_fallback(self):
+        strategy = resolve_table_strategy(
+            "RECOGNIZED_ASSETS",
+            STRATEGY_RECOGNIZED_ASSETS,
+        )
+        self.assertEqual(strategy.strategy_id, STRATEGY_RECOGNIZED_ASSETS)
+        self.assertEqual(strategy.table_id, "RECOGNIZED_ASSETS")
+
+    def test_recognized_assets_v2_is_default(self):
+        strategy = resolve_table_strategy("RECOGNIZED_ASSETS")
+        self.assertEqual(strategy.strategy_id, STRATEGY_RECOGNIZED_ASSETS_V2)
+
+    def test_simplify_recognized_assets_columns_keeps_recognized_value_only(self):
+        rows = [
+            ["行次", "项目", "期末数", "", "", "期初数", "", ""],
+            ["", "", "账面价值", "非认可价值", "认可价值",
+             "账面价值", "非认可价值", "认可价值"],
+            ["1", "现金及流动性管理工具", "100", "20", "80", "90", "18", "72"],
+            ["2", "认可资产合计", "", "", "800", "", "", "720"],
+        ]
+        simplified, changed = _simplify_recognized_assets_columns(rows)
+
+        self.assertTrue(changed)
+        self.assertEqual(simplified, [
+            ["行次", "项目", "期末数", "期初数"],
+            ["1", "现金及流动性管理工具", "80", "72"],
+            ["2", "认可资产合计", "800", "720"],
+        ])
+
+    def test_simplify_recognized_assets_columns_skips_single_level_table(self):
+        rows = [
+            ["行次", "项目", "期末数", "期初数"],
+            ["1", "现金及流动性管理工具", "80", "72"],
+        ]
+        simplified, changed = _simplify_recognized_assets_columns(rows)
+
+        self.assertFalse(changed)
+        self.assertEqual(simplified, rows)
+
+    def test_recognized_assets_v2_postprocess_simplifies_and_normalizes_total(self):
+        rows = [
+            ["行次", "项目", "期末数", "", "", "期初数", "", ""],
+            ["", "", "账面价值", "非认可价值", "认可价值",
+             "账面价值", "非认可价值", "认可价值"],
+            ["1", "现金及流动性管理工具", "100", "20", "80", "90", "18", "72"],
+            ["合计", "", "", "", "800", "", "", "720"],
+        ]
+        result, notes = RECOGNIZED_ASSETS_V2_POSTPROCESS_HANDLER(
+            PostprocessRequest(table_id="RECOGNIZED_ASSETS", rows=rows)
+        )
+
+        self.assertEqual(result, [
+            ["行次", "项目", "期末数", "期初数"],
+            ["1", "现金及流动性管理工具", "80", "72"],
+            ["认可资产合计", "", "800", "720"],
+        ])
+        self.assertTrue(any("化简" in note for note in notes))
+        self.assertTrue(any("认可资产合计" in note for note in notes))
 
     def test_unregistered_table_uses_generic_strategy(self):
         strategy = resolve_table_strategy("NEW_SIMPLE_TABLE")

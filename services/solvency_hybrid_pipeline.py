@@ -41,6 +41,7 @@ from .solvency_ai_table_extractor import (
     unit_recovery_needed,
 )
 from .solvency_table_boundaries import (
+    TABLE_CANONICAL_HEADERS,
     TableBoundaryError,
     boundary_instruction_for_table,
     boundary_items,
@@ -78,6 +79,7 @@ from .table_strategy_registry import (
 )
 
 PAGE_TEXT_MODE = "逐页文本结构化提取"
+PAGE_DETERMINISTIC_MODE = "原文定向提取"
 PAGE_VISION_MODE = "逐页图像结构化提取"
 PAGE_HIGH_RES_VISION_MODE = "逐页3倍高清图像结构化提取"
 PAGE_RETRY_MODE = "逐页网格纠错"
@@ -747,9 +749,16 @@ def _locator_conflict(
         for name, pages in nonempty:
             if name == "首尾项目闭合":
                 continue
-            if set(pages) != local_set:
+            source_set = set(pages)
+            # A semantic or visual locator may return a wider chapter-level
+            # range, or only confirm the text/scan pages it can inspect.  Once
+            # the deterministic locator has found both the first and last
+            # business items, overlapping evidence is corroborating (but less
+            # precise or partial), not a material conflict.  Keep isolating
+            # truly disjoint evidence.
+            if source_set.isdisjoint(local_set):
                 reasons.append(
-                    f"首尾项目闭合页{sorted(local_set)}与{name}页{pages}不一致"
+                    f"首尾项目闭合页{sorted(local_set)}与{name}页{pages}无交集"
                 )
     elif len(nonempty) >= 2:
         for index, (left_name, left_pages) in enumerate(nonempty):
@@ -765,7 +774,11 @@ def _locator_conflict(
         for _, pages in nonempty
         for page in pages
     })
-    if directory_pages and primary_pages:
+    # The directory is only a weak prior after a table has been closed by its
+    # first/last items.  Do not quarantine a correct closed range because a
+    # printed-page offset or directory entry is stale; retain the directory
+    # candidate in the evidence trail instead.
+    if directory_pages and primary_pages and not boundary_closed:
         if all(
             min(abs(candidate - primary) for primary in primary_pages) > 1
             for candidate in directory_pages
@@ -797,6 +810,11 @@ def _locator_prompt(
     }
     return f"""你是{prompt_role}。请定位下列目标表的PDF物理页码。
 当前报告 profile：{profile_name}
+
+【目录/标题双通道候选】
+A. 目录驱动：读取目录候选并换算成PDF物理页，只把它作为正文检索起点。
+B. 标题驱动：直接扫描逐页文本中的正式章节标题、表名和续表标记；没有目录或目录不完整时，以正文证据为准。
+C. 两个通道都必须再由表头、首尾数据项目和续表关系验证，不能仅因章节主题相近就扩大页码范围。
 
 【通用执行方法】
 1. 页面标题、表头、首尾数据项目和明确的续表关系是主要证据；下方Python表格雷达可能误报，只能作为待复核候选，不能单独证明页面属于目标表。
@@ -831,6 +849,20 @@ def _locator_prompt(
 
 输出示例：
 {json.dumps(example, ensure_ascii=False)}"""
+
+
+def _locator_page_excerpt(text: str, max_characters: int = 1600) -> str:
+    """Keep both the title area and closing rows in each locator excerpt."""
+    compact_text = " ".join(str(text or "").split())
+    if len(compact_text) <= max_characters:
+        return compact_text
+    head_size = max(1, int(max_characters * 0.62))
+    tail_size = max(1, max_characters - head_size)
+    return (
+        compact_text[:head_size]
+        + " …[页面中部省略]… "
+        + compact_text[-tail_size:]
+    )
 
 
 def locate_tables_hybrid(
@@ -885,7 +917,7 @@ def locate_tables_hybrid(
         for item in tables
     )
     scan_text = "\n\n".join(
-        f"---PDF物理第{index + 1}页---\n{' '.join(text.split())[:1600]}"
+        f"---PDF物理第{index + 1}页---\n{_locator_page_excerpt(text)}"
         for index, text in enumerate(page_texts)
         if index + 1 in searchable_pages
     )
@@ -1009,7 +1041,16 @@ def locate_tables_hybrid(
         if boundary_closed:
             evidence_parts.append("首尾项目已闭合，页码范围以项目边界为准")
         if ai_pages:
-            evidence_parts.append(f"大模型页码推断：{','.join(map(str, ai_pages))}")
+            ai_extra_pages = sorted(set(ai_pages) - set(local_pages))
+            if boundary_closed and ai_extra_pages:
+                evidence_parts.append(
+                    "大模型返回较宽候选："
+                    + ",".join(map(str, ai_pages))
+                    + "；已按首尾项目闭合范围收敛，排除相邻非目标页："
+                    + ",".join(map(str, ai_extra_pages))
+                )
+            else:
+                evidence_parts.append(f"大模型页码推断：{','.join(map(str, ai_pages))}")
         if excluded_detail_pages:
             evidence_parts.append(
                 "已隔离非目标明细页："
@@ -1330,6 +1371,24 @@ def _validate_single_page(
 def _header_score(table_id: str, row: list[str]) -> int:
     text = _row_text(row)
     config = active_table_strategy(table_id).table_config
+    canonical_headers = [
+        _compact(item)
+        for item in (
+            config.get("canonical_headers")
+            or TABLE_CANONICAL_HEADERS.get(table_id, ())
+        )
+        if _compact(item)
+    ]
+    if canonical_headers:
+        row_cells = [_compact(cell) for cell in row]
+        canonical_hits = sum(
+            index < len(row_cells) and row_cells[index] == expected
+            for index, expected in enumerate(canonical_headers)
+        )
+        if canonical_hits >= max(1, math.ceil(len(canonical_headers) * 0.6)):
+            # Exact canonical cells must outrank generic words such as “平均”
+            # that can also occur in ordinary business-row labels.
+            return 100 + canonical_hits
     headers = tuple(
         config.get("header_terms") or TABLE_HEADERS.get(table_id, ())
     )
@@ -1347,6 +1406,36 @@ def _is_same_header(left: list[str], right: list[str]) -> bool:
         for x, y in zip(a, b)
     )
     return matches / width >= 0.5
+
+
+_ROW_NUMBER_CELL_RE = re.compile(r"^\d+(?:\.\d+)*(?:[、.)）])?$")
+
+
+def _strip_orphan_row_number_column(
+    table_id: str,
+    header: list[str],
+    rows: list[list[str]],
+) -> list[list[str]]:
+    """Remove a source row-number column omitted by the canonical header."""
+    if table_id != "SOLVENCY_MAIN" or not header or not rows:
+        return rows
+    header_text = _compact("".join(header[:2]))
+    if any(term in header_text for term in ("行次", "序号", "编号")):
+        return rows
+
+    source_width = len(header) + 1
+    candidates = [row for row in rows if len(row) == source_width]
+    if len(candidates) < 2:
+        return rows
+    row_number_hits = sum(
+        bool(_ROW_NUMBER_CELL_RE.fullmatch(_compact(row[0])))
+        and bool(_compact(row[1]))
+        for row in candidates
+    )
+    if row_number_hits / len(candidates) < 0.8:
+        return rows
+
+    return [row[1:] if len(row) == source_width else row for row in rows]
 
 
 def _meaningful_width(rows: list[list[str]]) -> int:
@@ -1449,10 +1538,14 @@ def _merge_page_rows(
 
     merged_data: list[list[str]] = []
     category_titles = {"效益类指标", "规模类指标", "品质类指标"}
+    canonical_header_selected = _header_score(table_id, header) >= 100
     for page_index, (_, rows) in enumerate(ordered):
         start = header_row_index + 1 if page_index == header_page_index else 0
         for row in rows[start:]:
-            if _is_same_header(row, header) or _header_score(table_id, row) >= 2:
+            row_header_score = _header_score(table_id, row)
+            if _is_same_header(row, header) or (
+                row_header_score >= (100 if canonical_header_selected else 2)
+            ):
                 continue
             nonempty = [cell for cell in row if _compact(cell)]
             row_text = _row_text(row)
@@ -1469,6 +1562,11 @@ def _merge_page_rows(
             merged_data.append(row)
     if not merged_data:
         raise ExtractionQualityError("逐页结果去重后没有数据行。")
+    merged_data = _strip_orphan_row_number_column(
+        table_id,
+        header,
+        merged_data,
+    )
     width = max(len(header), *(len(row) for row in merged_data))
     if len(header) < width:
         header = header + [f"列{index + 1}" for index in range(len(header), width)]
@@ -1476,6 +1574,35 @@ def _merge_page_rows(
         header[:width],
         *[(row + [""] * (width - len(row)))[:width] for row in merged_data],
     ]
+
+
+def _deterministic_three_year_rows(
+    grid: PageGrid,
+    table_config: Mapping[str, object] | None = None,
+) -> tuple[list[list[str]] | None, str]:
+    """Recover the fixed two-row disclosure directly from the source grid."""
+    sliced = _slice_grid_for_target(
+        "THREE_YEAR_INVESTMENT_RETURN",
+        grid.grid_text,
+        table_config,
+    )
+    source_rows = [
+        [line.partition("|")[2].strip()]
+        for line in sliced.splitlines()
+        if line.partition("|")[2].strip()
+    ]
+    normalized, note = normalize_three_year_return_rows_core(
+        "THREE_YEAR_INVESTMENT_RETURN",
+        source_rows,
+    )
+    if len(normalized) != 3:
+        return None, ""
+    if [row[0] for row in normalized[1:]] != [
+        "近三年平均投资收益率",
+        "近三年平均综合投资收益率",
+    ]:
+        return None, ""
+    return normalized, note or "已从源PDF文字网格定向恢复两项近三年收益率"
 
 
 def _extract_one_page(
@@ -1505,6 +1632,43 @@ def _extract_one_page(
     render_images = render_func or _render_images
     text_error = ""
     if not force_vision:
+        deterministic_rows, deterministic_note = _deterministic_three_year_rows(
+            grid,
+            table_config,
+        ) if table_id == "THREE_YEAR_INVESTMENT_RETURN" else (None, "")
+        if deterministic_rows:
+            try:
+                score, expected, actual = _validate_single_page(
+                    table_id,
+                    deterministic_rows,
+                    grid,
+                    0.0,
+                )
+                logs.append(ExtractionLog(
+                    table_id,
+                    table_name,
+                    [page_number],
+                    PAGE_DETERMINISTIC_MODE,
+                    "成功",
+                    f"{deterministic_note}；源网格确认{expected}条数值行，返回{actual}条。",
+                ))
+                return (
+                    deterministic_rows,
+                    PAGE_DETERMINISTIC_MODE,
+                    score,
+                    logs,
+                    extract_unit_records(table_id, deterministic_rows, [grid]),
+                )
+            except Exception as exc:
+                text_error = f"原文定向提取未通过质量检查：{exc}"
+                logs.append(ExtractionLog(
+                    table_id,
+                    table_name,
+                    [page_number],
+                    PAGE_DETERMINISTIC_MODE,
+                    "转大模型提取",
+                    text_error,
+                ))
         try:
             if grid.word_count < 6:
                 raise ExtractionQualityError("本页可检索文字不足。")
@@ -1821,7 +1985,7 @@ def extract_tables_hybrid(
                     force_vision=force_vision,
                     timeout=timeout,
                     post_func=post_func,
-                    progress_callback=None,
+                    progress_callback=progress_callback,
                     _parallel_tables=False,
                     _shared_grid_cache=grid_cache,
                     _shared_image_cache=image_cache,
@@ -1834,9 +1998,6 @@ def extract_tables_hybrid(
                 index = future_map[future]
                 bundle = future.result()
                 completed[index] = bundle
-                if progress_callback:
-                    for log in bundle.logs:
-                        progress_callback(log)
         for index in range(len(active_matches)):
             bundle = completed[index]
             tables.extend(bundle.tables)

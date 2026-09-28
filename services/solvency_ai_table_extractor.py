@@ -75,6 +75,12 @@ TABLE_COMPLETENESS_TERMS = {
         "附属二级资本",
         "实际资本合计",
     ),
+    "RECOGNIZED_ASSETS": (
+        "现金及流动性管理工具",
+        "投资资产",
+        "再保险资产",
+        "认可资产合计",
+    ),
 }
 
 TABLE_MIN_NUMERIC_ROWS = {
@@ -99,6 +105,7 @@ AI_TABLE_END_MARKERS = {
         "最低资本表",
     ),
     "THREE_YEAR_INVESTMENT_RETURN": ("S02", "实际资本表", "实际资本明细表", "最低资本表"),
+    "RECOGNIZED_ASSETS": ("S04", "认可负债表", "最低资本表"),
     "MINIMUM_CAPITAL": ("S06", "风险综合评级", "偿付能力风险管理评估", "风险管理能力"),
 }
 
@@ -1338,6 +1345,8 @@ def _source_completeness_profile_core(
                     canonical_item = "最低资本"
                 elif table_id == "ACTUAL_CAPITAL":
                     canonical_item = "实际资本合计"
+                elif table_id == "RECOGNIZED_ASSETS":
+                    canonical_item = "认可资产合计"
             required_terms.append(canonical_item)
 
     numeric_rows = 0
@@ -1443,18 +1452,22 @@ def _source_item_labels(
             and _is_operating_section_only_line(content, number_matches)
         ):
             continue
-        if (
-            len(number_matches) == 2
+        # The item label ends at the first value column. When a row starts with
+        # a lone row-number (\u884c\u6b21/\u5e8f\u53f7) cell, that index is the first numeric
+        # token, so the first value is the following token; otherwise the first
+        # token is already a value. Anchoring to the first value keeps
+        # multi-value-column tables (e.g. RECOGNIZED_ASSETS with \u8d26\u9762\u4ef7\u503c/\u975e\u8ba4\u53ef
+        # \u4ef7\u503c/\u8ba4\u53ef\u4ef7\u503c \u00d7 \u671f\u672b/\u671f\u521d) from gluing value cells into the label.
+        first_prefix = content[: number_matches[0].start()].strip()
+        is_leading_row_number = (
+            not first_prefix
             and re.match(
-                r"^\s*\d+(?:\.\d+)*\*?\s+[\u4e00-\u9fffA-Za-z]",
+                r"^\s*\d+(?:\.\d+)*\*?\.?\s*[一-鿿A-Za-z]",
                 content,
             )
-        ):
-            # Row-number tables can legitimately disclose a single value,
-            # notably the separate next-quarter forecast subtable.
-            number_match = number_matches[-1]
-        else:
-            number_match = number_matches[-2]
+        )
+        value_index = 1 if is_leading_row_number else 0
+        number_match = number_matches[value_index]
         label_prefix = content[:number_match.start()].strip()
         recovered_wrapped_label = False
         if (
@@ -2380,11 +2393,27 @@ def extraction_logs_frame(logs: list[ExtractionLog]) -> pd.DataFrame:
     return pd.DataFrame([item.to_dict() for item in logs], columns=columns)
 
 
-def reconstructed_workbook_bytes(bundle: AIExtractionBundle) -> bytes:
+def reconstructed_workbook_bytes(
+    bundle: AIExtractionBundle,
+    metadata: Mapping[str, object] | None = None,
+) -> bytes:
     output = io.BytesIO()
     used: set[str] = {"提取日志"}
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         extraction_logs_frame(bundle.logs).to_excel(writer, sheet_name="提取日志", index=False)
+        metadata_rows = [
+            {"字段": key, "值": value}
+            for key in ("公司", "报告年度", "报告季度", "报告期", "披露日期", "来源文件")
+            if (value := (metadata or {}).get(key)) not in (None, "")
+        ]
+        if metadata_rows:
+            metadata_sheet = "报告元信息"
+            pd.DataFrame(metadata_rows).to_excel(
+                writer,
+                sheet_name=metadata_sheet,
+                index=False,
+            )
+            used.add(metadata_sheet)
         unit_frames = [
             table.units_frame() for table in bundle.tables if table.unit_records
         ]

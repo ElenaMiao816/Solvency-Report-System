@@ -12,6 +12,7 @@ from services.solvency_ai_table_extractor import (
 from services.table_strategy_handlers import CompletenessRequest
 from services.table_strategy_registry import resolve_table_strategy
 from services.solvency_normalizer import _period_header
+from services.solvency_hybrid_pipeline import _merge_page_rows
 
 
 class SolvencyMainForecastTests(unittest.TestCase):
@@ -106,6 +107,27 @@ class SolvencyMainForecastTests(unittest.TestCase):
             ),
             "下季度末预测数",
         )
+
+    def test_merge_discards_source_row_numbers_missing_from_standard_header(self):
+        rows = _merge_page_rows(
+            "SOLVENCY_MAIN",
+            "偿付能力充足率指标",
+            [10],
+            {10: [
+                ["指标名称", "本季度末数", "上季度末数", "下季度末预测数"],
+                ["1", "认可资产", "59,762,185,553.49", "55,045,435,318.22", "63,600,204,450.48"],
+                ["3.1", "核心一级资本", "2,855,607,010.41", "2,911,714,989.71", "2,835,233,069.07"],
+                ["8", "综合偿付能力充足率", "184.61%", "207.24%", "164.97%"],
+            ]},
+        )
+
+        self.assertEqual(
+            rows[0],
+            ["指标名称", "本季度末数", "上季度末数", "下季度末预测数"],
+        )
+        self.assertEqual(rows[1][0], "认可资产")
+        self.assertEqual(rows[1][-1], "63,600,204,450.48")
+        self.assertTrue(all(len(row) == 4 for row in rows))
 
 
 if __name__ == "__main__":
