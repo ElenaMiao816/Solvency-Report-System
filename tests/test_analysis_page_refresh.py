@@ -94,9 +94,14 @@ class AnalysisPageRefreshTests(unittest.TestCase):
         self.assertNotIn("on_select=", renderer_source)
         self.assertNotIn("selection_mode=", renderer_source)
 
-    def test_only_stale_step7_report_modules_are_hidden_on_screen_and_in_print(self):
-        selector = '[class*="st-key-s7_report_module_"]:has('
-        self.assertIn(selector, self.app_source)
+    def test_only_stale_step7_elements_are_hidden_without_hiding_current_module(self):
+        unsafe_parent_selector = '[class*="st-key-s7_report_module_"]:has('
+        self.assertNotIn(unsafe_parent_selector, self.app_source)
+        stale_child_selector = (
+            '[class*="st-key-s7_report_module_"]\n'
+            '      [data-testid="stElementContainer"][data-stale="true"]'
+        )
+        self.assertIn(stale_child_selector, self.app_source)
         self.assertIn(
             '[data-testid="stElementContainer"][data-stale="true"]',
             self.app_source,
@@ -114,7 +119,7 @@ class AnalysisPageRefreshTests(unittest.TestCase):
             self.app_source,
         )
         self.assertNotIn("opacity:1!important; transition:none!important", self.app_source)
-        cleanup_start = self.app_source.index(selector)
+        cleanup_start = self.app_source.index(stale_child_selector)
         cleanup_end = self.app_source.index("@media print", cleanup_start)
         cleanup_rule = self.app_source[cleanup_start:cleanup_end]
         self.assertIn("display:none!important", cleanup_rule)

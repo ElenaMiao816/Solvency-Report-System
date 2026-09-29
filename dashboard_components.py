@@ -84,13 +84,6 @@ export default function (component) {
     view.dispatchEvent(new view.Event("resize"))
     void doc.body.offsetWidth
   }
-  const removePrintMode = () => {
-    root.classList.remove(
-      "solvency-print-mode-portrait",
-      "solvency-print-mode-widescreen",
-    )
-    doc.getElementById("dynamic-solvency-print-style")?.remove()
-  }
   const printContentRoot = () => (
     doc.querySelector('[data-testid="stMain"]') ?? doc.body
   )
@@ -99,6 +92,74 @@ export default function (component) {
     return style.display !== "none"
       && style.visibility !== "hidden"
       && element.getClientRects().length > 0
+  }
+  const printableReportModules = () => Array.from(
+    printContentRoot().querySelectorAll(
+      '[class*="st-key-s7_report_module_"]'
+    )
+  ).filter(participatesInPrintLayout)
+  const resetWidescreenPageFitting = () => {
+    printableReportModules().forEach((module) => {
+      module.style.removeProperty("--solvency-print-scale")
+      delete module.dataset.solvencyPrintScale
+    })
+  }
+  const waitForPrintAssets = async () => {
+    try {
+      await doc.fonts?.ready
+    } catch (_) {
+      // Font readiness is an enhancement; measured fitting still has a fallback.
+    }
+    const images = Array.from(printContentRoot().querySelectorAll("img"))
+    await Promise.all(images.map(async (image) => {
+      if (image.complete) return
+      await Promise.race([
+        new Promise((resolve) => {
+          image.addEventListener("load", resolve, { once: true })
+          image.addEventListener("error", resolve, { once: true })
+        }),
+        delay(2000),
+      ])
+    }))
+  }
+  const fitWidescreenReportPages = () => {
+    if (!root.classList.contains("solvency-print-mode-widescreen")) return
+    printableReportModules().forEach((module) => {
+      const content = module.querySelector(
+        ':scope > [data-testid="stVerticalBlock"]'
+      ) ?? module.firstElementChild
+      if (!content) return
+
+      module.style.setProperty("--solvency-print-scale", "1")
+      void content.offsetHeight
+      const moduleStyle = view.getComputedStyle(module)
+      const availableWidth = module.clientWidth
+        - parseFloat(moduleStyle.paddingLeft || "0")
+        - parseFloat(moduleStyle.paddingRight || "0")
+      const availableHeight = module.clientHeight
+        - parseFloat(moduleStyle.paddingTop || "0")
+        - parseFloat(moduleStyle.paddingBottom || "0")
+      const contentRect = content.getBoundingClientRect()
+      const contentWidth = Math.max(content.scrollWidth, contentRect.width, 1)
+      const contentHeight = Math.max(content.scrollHeight, contentRect.height, 1)
+      // A small rounding allowance prevents a one-pixel spill page on browsers
+      // that convert CSS millimetres to device pixels differently.
+      const scale = Math.max(
+        0.01,
+        Math.min(1, availableWidth / contentWidth, availableHeight / contentHeight) * 0.995,
+      )
+      const value = scale.toFixed(5)
+      module.style.setProperty("--solvency-print-scale", value)
+      module.dataset.solvencyPrintScale = value
+    })
+  }
+  const removePrintMode = () => {
+    resetWidescreenPageFitting()
+    root.classList.remove(
+      "solvency-print-mode-portrait",
+      "solvency-print-mode-widescreen",
+    )
+    doc.getElementById("dynamic-solvency-print-style")?.remove()
   }
   const hasStaleElements = () => Array.from(
     printContentRoot().querySelectorAll(
@@ -128,6 +189,7 @@ export default function (component) {
   const finishJob = (job) => {
     if (activeJob !== job) return
     removePrintMode()
+    view.removeEventListener("beforeprint", job.beforePrint)
     view.removeEventListener("afterprint", job.afterPrint)
     if (view.__solvencyDashboardPrintJob === job) {
       delete view.__solvencyDashboardPrintJob
@@ -139,7 +201,11 @@ export default function (component) {
 
   buttons.forEach((button) => button.onclick = async () => {
     if (disposed || view.__solvencyDashboardPrintJob) return
-    const job = { afterPrint: null }
+    const job = { beforePrint: null, afterPrint: null }
+    job.beforePrint = () => {
+      resizeCharts()
+      fitWidescreenReportPages()
+    }
     job.afterPrint = () => finishJob(job)
     activeJob = job
     view.__solvencyDashboardPrintJob = job
@@ -172,6 +238,7 @@ export default function (component) {
     // Streamlit injects page-level styles inside the document body. Appending
     // here makes the selected paper rule the last rule in cascade order.
     doc.body.appendChild(style)
+    view.addEventListener("beforeprint", job.beforePrint)
     view.addEventListener("afterprint", job.afterPrint, { once: true })
     // Give Streamlit/Vega two completed layouts at the final paper width.
     // This keeps bar widths and text native to each narrow company panel
@@ -180,6 +247,7 @@ export default function (component) {
     resizeCharts()
     await new Promise((resolve) => view.requestAnimationFrame(resolve))
     resizeCharts()
+    await waitForPrintAssets()
     await delay(360)
 
     // A rerun may begin while the print-width layout is settling. Never open
@@ -189,6 +257,10 @@ export default function (component) {
       return
     }
     resizeCharts()
+    await new Promise((resolve) => view.requestAnimationFrame(resolve))
+    fitWidescreenReportPages()
+    await new Promise((resolve) => view.requestAnimationFrame(resolve))
+    fitWidescreenReportPages()
     try {
       view.print()
     } finally {
@@ -1040,6 +1112,7 @@ def render_print_control(*, key: str = "solvency_dashboard_print") -> None:
     st.markdown("### :material/print: 打印/导出 PDF")
     st.info(
         "竖版 A4 与横版 16:9 均导出封面、正文和封底。"
+        "横版 16:9 会在打印前按每页实际内容自动等比缩放并居中，确保标题、注释、图例和图表保持在同一页。"
         "打印时请勾选“背景图形”以保留颜色。"
     )
     _PRINT_COMPONENT(key=key, width="stretch", height=96)

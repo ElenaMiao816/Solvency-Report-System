@@ -346,13 +346,11 @@ st.markdown(
       margin:0 0 0.75rem; color:rgba(49,51,63,.6); font-size:0.875rem;
     }
     [data-testid="stMetric"] {background:#F4F7FC; border-left:4px solid #00338D; padding:12px; border-radius:5px;}
-    /* Remove only obsolete STEP7 report modules left behind during a rerun in
-       both screen and print media. Controls and the current report stay visible;
-       stale chart copies cannot accumulate or consume a printed page. */
+    /* Remove obsolete STEP7 elements left behind during a rerun without hiding
+       the current module merely because one nested chart is still stale. */
     [class*="st-key-s7_report_module_"][data-stale="true"],
-    [class*="st-key-s7_report_module_"]:has(
-      [data-testid="stElementContainer"][data-stale="true"]
-    ),
+    [class*="st-key-s7_report_module_"]
+      [data-testid="stElementContainer"][data-stale="true"],
     [data-testid="stElementContainer"][data-stale="true"]:has(
       [class*="st-key-s7_report_module_"]
     ) {

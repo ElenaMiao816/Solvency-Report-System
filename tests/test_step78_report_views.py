@@ -10,9 +10,9 @@ import pandas as pd
 from streamlit.testing.v1 import AppTest
 
 from step7_solvency import (
-    BUBBLE_DISTINCT_COLORS,
     BUBBLE_FULL_PANEL_WIDTH,
     BUBBLE_ZOOM_PANEL_WIDTH,
+    COMPANY_CHART_RENDER_KEYS,
     COMPONENT_STACK_DENOMINATOR_CODES,
     COMPONENT_STACK_SPECS,
     DEFAULT_SORT_LABEL,
@@ -40,6 +40,7 @@ from step7_solvency import (
     _report_style,
     _sort_companies_by_metric,
     _unavailable_metric_details,
+    show_step_7_solvency,
 )
 from step8_solvency import (
     SUPPLEMENTAL_SECTIONS,
@@ -166,7 +167,7 @@ class Step78ReportViewTests(unittest.TestCase):
         self.assertIn('width:100%!important; min-width:0!important; max-width:100%!important', print_css)
         self.assertIn('table-layout:fixed!important', print_css)
         self.assertIn('font-size:9px!important; padding:3px 2px!important', print_css)
-        self.assertIn('width:var(--solvency-print-content-width)!important', print_css)
+        self.assertIn('width:var(--solvency-print-page-width)!important', print_css)
         self.assertIn('max-width:100%!important; height:auto!important', print_css)
         self.assertIn('min-height:280px!important', print_css)
         self.assertIn('width:100%!important; min-width:0!important; max-width:100%!important', print_css)
@@ -177,13 +178,22 @@ class Step78ReportViewTests(unittest.TestCase):
             print_css,
         )
         self.assertIn('margin:0 auto!important; padding:0!important', print_css)
-        self.assertIn('padding:8mm 0 0!important', print_css)
+        self.assertIn('height:var(--solvency-print-page-height)!important', print_css)
+        self.assertIn('padding:8mm 12mm!important', print_css)
+        self.assertIn('align-items:center!important', print_css)
+        self.assertIn('justify-content:center!important', print_css)
+        self.assertIn('transform:scale(var(--solvency-print-scale))!important', print_css)
+        self.assertIn('transform-origin:center center!important', print_css)
+        self.assertIn('page-break-before:auto!important', print_css)
         self.assertIn('font-size:30px!important', print_css)
         self.assertIn('margin:10px 0 8px!important', print_css)
         screen_css = source[source.index("<style>"):source.index("@media print {")]
         self.assertIn('st-key-annual_company_grid_', screen_css)
         self.assertIn('flex-wrap:nowrap!important', screen_css)
         self.assertIn('flex:1 1 0!important', screen_css)
+        self.assertIn('html.solvency-print-mode-widescreen {', screen_css)
+        self.assertIn('height:var(--solvency-print-page-height)!important', screen_css)
+        self.assertIn('transform:scale(var(--solvency-print-scale))!important', screen_css)
         self.assertNotIn('table-layout:fixed!important', screen_css)
 
     def test_step7_ai_completion_url_accepts_root_or_full_endpoint(self):
@@ -300,24 +310,41 @@ class Step78ReportViewTests(unittest.TestCase):
         self.assertEqual(colors["乙"], "#00338D")
         self.assertNotEqual(colors["甲"], "#00338D")
 
-    def test_capital_efficiency_bubbles_use_distinct_non_repeating_colors(self):
-        companies = [f"公司{index:02d}" for index in range(len(BUBBLE_DISTINCT_COLORS))]
-        colors = _bubble_company_color_map(companies)
-        tracked_colors = _bubble_company_color_map(companies, companies[7])
+    def test_capital_efficiency_bubbles_use_shared_company_colors(self):
+        companies = ["甲", "乙", "丙"]
 
-        self.assertEqual(len(set(colors.values())), len(companies))
-        self.assertEqual(len(set(tracked_colors.values())), len(companies))
-        self.assertEqual(tracked_colors[companies[7]], "#00338D")
+        self.assertEqual(
+            _bubble_company_color_map(companies),
+            _company_color_map(companies),
+        )
+        self.assertEqual(
+            _bubble_company_color_map(companies, "乙"),
+            _company_color_map(companies, "乙"),
+        )
 
-        def rgb(color: str) -> tuple[int, int, int]:
-            return tuple(int(color[index:index + 2], 16) for index in (1, 3, 5))
+        renderer = getattr(
+            _render_capital_efficiency_bubble_fragment,
+            "__wrapped__",
+            _render_capital_efficiency_bubble_fragment,
+        )
+        self.assertNotIn("_bubble_company_color_map", inspect.getsource(renderer))
 
-        distances = [
-            sum((left - right) ** 2 for left, right in zip(rgb(first), rgb(second))) ** 0.5
-            for index, first in enumerate(BUBBLE_DISTINCT_COLORS)
-            for second in BUBBLE_DISTINCT_COLORS[index + 1:]
-        ]
-        self.assertGreater(min(distances), 40.0)
+        combination_source = inspect.getsource(_render_combination_analysis)
+        metric_source = inspect.getsource(_render_report_metric)
+        expected_mapping = '_company_color_map(frame["公司"], highlight_company)'
+        self.assertIn(expected_mapping, combination_source)
+        self.assertIn(expected_mapping, metric_source)
+
+    def test_print_all_uses_stable_chart_keys_and_keeps_solvency_ratio_chart(self):
+        self.assertIn("核心及综合充足率", COMPANY_CHART_RENDER_KEYS)
+        self.assertNotEqual(
+            COMPANY_CHART_RENDER_KEYS["核心及综合充足率"],
+            COMPANY_CHART_RENDER_KEYS["综合充足率变化"],
+        )
+        source = inspect.getsource(show_step_7_solvency)
+        self.assertIn("COMPANY_CHART_RENDER_KEYS.get", source)
+        self.assertIn('key=f"s7_report_module_{chart_render_key}"', source)
+        self.assertIn('key_prefix=f"s7_{chart_render_key}"', source)
 
     def test_step7_company_type_scope_controls_available_companies(self):
         frame = pd.DataFrame([
