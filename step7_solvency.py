@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import colorsys
 import re
 from collections.abc import Callable, Iterable
 from datetime import date
@@ -126,33 +125,12 @@ RISK_SCATTER_FULL_PANEL_WIDTH = 570
 RISK_SCATTER_ZOOM_PANEL_WIDTH = 330
 BUBBLE_FULL_PANEL_WIDTH = 570
 BUBBLE_ZOOM_PANEL_WIDTH = 330
-BUBBLE_DISTINCT_COLORS = (
-    "#1FDB1F",
-    "#DB651F",
-    "#1FDBDB",
-    "#DB1F89",
-    "#84943E",
-    "#A01FDB",
-    "#3E7494",
-    "#943E43",
-    "#1FDB89",
-    "#DBAC1F",
-    "#DB1F42",
-    "#A44DB8",
-    "#29946C",
-    "#259415",
-    "#B8824D",
-    "#5C84DB",
-    "#1F42DB",
-    "#9AB81A",
-    "#DB1FC4",
-    "#943E74",
-    "#5CBCDB",
-    "#944415",
-    "#DB5C84",
-    "#DB6C5C",
-)
-
+COMPANY_CHART_RENDER_KEYS = {
+    chart_name: f"chart_{index}"
+    for index, chart_name in enumerate(
+        dict.fromkeys(entry.chart_name for entry in COMPANY_NAVIGATION)
+    )
+}
 COMPONENT_STACK_SPECS: dict[str, tuple[tuple[str, str, str], ...]] = {
     "计入各级资本的保单未来盈余构成占比": (
         ("POLICY_SURPLUS_CORE_T1", "计入核心一级资本", CAPITAL_STRUCTURE_COLORS["核心一级资本"]),
@@ -327,37 +305,8 @@ def _bubble_company_color_map(
     companies: Iterable[str],
     highlight_company: str = "无",
 ) -> dict[str, str]:
-    """Give every bubble a distinct color without changing other chart palettes."""
-    ordered = list(dict.fromkeys(str(company) for company in companies if str(company).strip()))
-    highlight = str(highlight_company or "").strip()
-    has_highlight = highlight in ordered
-    palette = list(BUBBLE_DISTINCT_COLORS)
-    if not has_highlight:
-        palette.insert(0, TRACKED_COMPANY_COLOR)
-
-    needed = len(ordered) - int(has_highlight)
-    used = {TRACKED_COMPANY_COLOR, *(color.upper() for color in palette)}
-    generated_index = 0
-    while len(palette) < needed:
-        hue = (0.137 + generated_index * 0.618033988749895) % 1.0
-        saturation = (0.68, 0.82, 0.74)[generated_index % 3]
-        value = (0.72, 0.84)[(generated_index // 3) % 2]
-        red, green, blue = colorsys.hsv_to_rgb(hue, saturation, value)
-        color = f"#{round(red * 255):02X}{round(green * 255):02X}{round(blue * 255):02X}"
-        generated_index += 1
-        if color.upper() not in used:
-            palette.append(color)
-            used.add(color.upper())
-
-    palette_index = 0
-    colors: dict[str, str] = {}
-    for company in ordered:
-        if has_highlight and company == highlight:
-            colors[company] = TRACKED_COMPANY_COLOR
-            continue
-        colors[company] = palette[palette_index]
-        palette_index += 1
-    return colors
+    """Keep bubble colors aligned with the shared Step7 company palette."""
+    return _company_color_map(companies, highlight_company)
 
 
 def _ordered_companies(frame: pd.DataFrame) -> list[str]:
@@ -599,6 +548,82 @@ def _report_style() -> None:
         .solvency-print-cover__date {font-size:19px; margin-top:18px;}
         .solvency-print-cover--front {page-break-after:always; break-after:page;}
         .solvency-print-cover--back {page-break-before:always; break-before:page;}
+        /* The print button adds this class before opening the browser dialog.
+           Keeping the final 16:9 geometry active during that short preflight lets
+           Vega reflow and lets JavaScript measure the exact printable content. */
+        html.solvency-print-mode-widescreen {
+            --solvency-print-page-width:338.67mm;
+            --solvency-print-page-height:190.5mm;
+            --solvency-print-content-width:314.67mm;
+            --solvency-print-content-height:174.5mm;
+        }
+        html.solvency-print-mode-widescreen,
+        html.solvency-print-mode-widescreen body,
+        html.solvency-print-mode-widescreen [data-testid="stAppViewContainer"],
+        html.solvency-print-mode-widescreen [data-testid="stMain"] {
+            width:var(--solvency-print-page-width)!important;
+            max-width:var(--solvency-print-page-width)!important;
+            margin:0 auto!important; padding:0!important;
+            overflow:visible!important; box-sizing:border-box!important;
+        }
+        html.solvency-print-mode-widescreen [data-testid="stMainBlockContainer"] {
+            width:var(--solvency-print-page-width)!important;
+            min-width:var(--solvency-print-page-width)!important;
+            max-width:var(--solvency-print-page-width)!important;
+            margin:0 auto!important; padding:0!important;
+            box-sizing:border-box!important; overflow:visible!important;
+        }
+        html.solvency-print-mode-widescreen [class*="st-key-s7_report_module_"] {
+            --solvency-print-scale:1;
+            width:var(--solvency-print-page-width)!important;
+            min-width:var(--solvency-print-page-width)!important;
+            max-width:var(--solvency-print-page-width)!important;
+            height:var(--solvency-print-page-height)!important;
+            min-height:var(--solvency-print-page-height)!important;
+            max-height:var(--solvency-print-page-height)!important;
+            padding:8mm 12mm!important;
+            margin:0 auto!important; box-sizing:border-box!important;
+            overflow:hidden!important;
+            display:flex!important; align-items:center!important;
+            justify-content:center!important;
+        }
+        html.solvency-print-mode-widescreen [class*="st-key-s7_report_module_"] > [data-testid="stVerticalBlock"] {
+            width:var(--solvency-print-content-width)!important;
+            min-width:var(--solvency-print-content-width)!important;
+            max-width:var(--solvency-print-content-width)!important;
+            flex:0 0 auto!important;
+            transform:scale(var(--solvency-print-scale))!important;
+            transform-origin:center center!important;
+            gap:0.45rem!important;
+            box-sizing:border-box!important;
+        }
+        html.solvency-print-mode-widescreen [class*="st-key-s7_report_module_"] [data-testid="stElementContainer"],
+        html.solvency-print-mode-widescreen [class*="st-key-s7_report_module_"] [data-testid="stVegaLiteChart"] {
+            width:100%!important; min-width:0!important; max-width:100%!important;
+            box-sizing:border-box!important;
+        }
+        html.solvency-print-mode-widescreen [class*="st-key-annual_company_grid_"],
+        html.solvency-print-mode-widescreen [class*="st-key-annual_company_grid_"] [data-testid="stHorizontalBlock"] {
+            display:grid!important; width:100%!important;
+            min-width:0!important; max-width:100%!important;
+            margin-left:0!important; margin-right:0!important;
+            grid-template-columns:none!important; grid-auto-flow:column!important;
+            grid-auto-columns:minmax(0,1fr)!important; gap:8px!important;
+        }
+        html.solvency-print-mode-widescreen [class*="st-key-annual_company_grid_"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+            width:100%!important; min-width:0!important; max-width:100%!important;
+            justify-self:stretch!important; box-sizing:border-box!important;
+        }
+        html.solvency-print-mode-widescreen [class*="st-key-annual_company_panel_"] {
+            width:100%!important; min-width:0!important; max-width:100%!important;
+            height:100%!important; padding:12px 3px 2px!important;
+        }
+        html.solvency-print-mode-widescreen .annual-company-title {
+            margin:0 0 12px!important;
+        }
+        html.solvency-print-mode-widescreen [class*="st-key-s7_company_bars_page_"] {
+            break-before:auto!important; page-break-before:auto!important;
+        }
         @media print {
             [data-testid="stHeader"], [data-testid="stSidebar"],
             [data-testid="stToolbar"], [data-testid="collapsedControl"],
@@ -681,9 +706,10 @@ def _report_style() -> None:
                 width:100%!important; min-width:0!important; max-width:100%!important;
                 height:280px!important; min-height:280px!important; max-height:280px!important;
             }
-            /* Follow the annual-report platform's centered full-sheet canvas.
-               Covers use the whole 16:9 page; body modules provide their own
-               symmetric 12 mm side margins and 8 mm top margin. */
+            /* Every report module is a self-contained 16:9 sheet.  The print
+               control measures the complete title/note/legend/chart block and
+               sets --solvency-print-scale so browser, font and DPI differences
+               cannot push any part onto another page. */
             html.solvency-print-mode-widescreen {
                 --solvency-print-page-width:338.67mm;
                 --solvency-print-page-height:190.5mm;
@@ -762,21 +788,37 @@ def _report_style() -> None:
                 gap:0!important; margin:0!important; padding:0!important;
             }
             html.solvency-print-mode-widescreen [class*="st-key-s7_report_module_"] {
+                --solvency-print-scale:1;
+                width:var(--solvency-print-page-width)!important;
+                min-width:var(--solvency-print-page-width)!important;
+                max-width:var(--solvency-print-page-width)!important;
+                height:var(--solvency-print-page-height)!important;
+                min-height:var(--solvency-print-page-height)!important;
+                max-height:var(--solvency-print-page-height)!important;
+                padding:8mm 12mm!important;
+                margin:0 auto!important; box-sizing:border-box!important;
+                overflow:hidden!important;
+                display:flex!important; align-items:center!important;
+                justify-content:center!important;
+                break-inside:avoid-page!important; page-break-inside:avoid!important;
+            }
+            html.solvency-print-mode-widescreen [class*="st-key-s7_report_module_"] > [data-testid="stVerticalBlock"] {
                 width:var(--solvency-print-content-width)!important;
                 min-width:var(--solvency-print-content-width)!important;
                 max-width:var(--solvency-print-content-width)!important;
-                min-height:0!important; padding:8mm 0 0!important;
-                margin:0 auto!important; box-sizing:border-box!important;
-                overflow:visible!important;
+                flex:0 0 auto!important;
+                transform:scale(var(--solvency-print-scale))!important;
+                transform-origin:center center!important;
+                gap:0.45rem!important;
+                box-sizing:border-box!important;
             }
-            html.solvency-print-mode-widescreen [class*="st-key-s7_report_module_"] > [data-testid="stVerticalBlock"],
             html.solvency-print-mode-widescreen [class*="st-key-s7_report_module_"] [data-testid="stElementContainer"],
             html.solvency-print-mode-widescreen [class*="st-key-s7_report_module_"] [data-testid="stVegaLiteChart"] {
                 width:100%!important; min-width:0!important; max-width:100%!important;
                 box-sizing:border-box!important;
             }
-            html.solvency-print-mode-widescreen [class*="st-key-s7_report_module_"] > [data-testid="stVerticalBlock"] {
-                gap:0.45rem!important;
+            html.solvency-print-mode-widescreen [class*="st-key-s7_company_bars_page_"] {
+                break-before:auto!important; page-break-before:auto!important;
             }
             html.solvency-print-mode-widescreen [class*="st-key-s7_report_module_"] img {
                 max-width:100%!important; height:auto!important;
@@ -1283,7 +1325,7 @@ def _render_report_metric(
             metric_frame,
             code,
             ordered_periods,
-            _company_color_map(metric_frame["公司"], highlight_company),
+            _company_color_map(frame["公司"], highlight_company),
             highlight_company,
         )
         if len(charts) > 1:
@@ -1434,10 +1476,6 @@ def _render_capital_efficiency_bubble_fragment(
         requested_highlight
         if requested_highlight in available_companies
         else ""
-    )
-    company_colors = _bubble_company_color_map(
-        available_companies,
-        tracked_company,
     )
     try:
         default_domain, latest_period = capital_efficiency_bubble_default_domain(
@@ -2119,7 +2157,7 @@ def _render_combination_analysis(
         else frame
     )
     converted = _convert_unit(chart_frame, unit_mode)
-    company_colors = _company_color_map(converted["公司"], highlight_company)
+    company_colors = _company_color_map(frame["公司"], highlight_company)
     company_panel_count = converted["公司"].nunique()
     dense_company_panels = company_panel_count >= 10
     if plan.kind == SOLVENCY_RATIO_COMBO:
@@ -2670,7 +2708,11 @@ def show_step_7_solvency(
         entries = [entry for entry in COMPANY_NAVIGATION if entry.chart_name == chart_name]
         level_one = entries[0].level_one if entries else ""
         level_two = entries[0].level_two if entries else ""
-        with st.container(key=f"s7_report_module_{chart_index}"):
+        chart_render_key = COMPANY_CHART_RENDER_KEYS.get(
+            chart_name,
+            f"chart_{chart_index}",
+        )
+        with st.container(key=f"s7_report_module_{chart_render_key}"):
             st.markdown(
                 f"<div class='solvency-module-title'>"
                 f"{level_one} - {level_two} - {chart_name}</div>",
@@ -2703,7 +2745,7 @@ def show_step_7_solvency(
                     _render_quality_and_capital(
                         scoped_status, chart_name, periods=selected_periods,
                         unit_mode=unit_mode, highlight_company=highlight_company,
-                        key_prefix=f"s7_{chart_index}", selected_companies=selected_companies,
+                        key_prefix=f"s7_{chart_render_key}", selected_companies=selected_companies,
                     )
                 elif plan.kind in {SINGLE_METRIC_TREND, TREND_WITH_COMPANY_BARS, COMPANY_BAR_TREND}:
                     for code in metric_codes_for_chart(chart_name):
@@ -2719,7 +2761,7 @@ def show_step_7_solvency(
                             show_average=show_average,
                             highlight_company=highlight_company,
                             enable_ai=enable_ai and ai_data_consent,
-                            key_prefix=f"s7_{chart_index}",
+                            key_prefix=f"s7_{chart_render_key}",
                             company_panels=plan.kind == COMPANY_BAR_TREND,
                             company_period_bars=plan.kind == TREND_WITH_COMPANY_BARS,
                         )
@@ -2730,7 +2772,7 @@ def show_step_7_solvency(
                         periods=selected_periods,
                         unit_mode=unit_mode,
                         highlight_company=highlight_company,
-                        key_prefix=f"s7_{chart_index}",
+                        key_prefix=f"s7_{chart_render_key}",
                         financing_data=financing_data,
                     )
             render_report_footnote(chart_note)
