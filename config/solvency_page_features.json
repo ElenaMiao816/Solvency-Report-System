@@ -394,6 +394,85 @@
                        "completeness_source_item_recall_ratio":  1.0
                    },
                    {
+                       "table_id":  "RECOGNIZED_LIABILITIES",
+                       "table_name":  "S04-认可负债表",
+                       "strategy_id":  "life_solvency.recognized_liabilities.v1",
+                       "section_code":  "S04",
+                       "title_terms":  [
+                                           "S04-认可负债表",
+                                           "S04认可负债表",
+                                           "认可负债表",
+                                           "认可负债明细表"
+                                       ],
+                       "content_terms":  [
+                                             "准备金负债",
+                                             "金融负债",
+                                             "应付及预收款项",
+                                             "认可负债合计",
+                                             "认可负债"
+                                         ],
+                       "header_terms":  [
+                                            "账面价值",
+                                            "非认可价值",
+                                            "认可价值",
+                                            "行次",
+                                            "项目",
+                                            "期末数",
+                                            "期初数"
+                                        ],
+                       "continuation_terms":  [
+                                                  "准备金负债",
+                                                  "金融负债",
+                                                  "应付及预收款项",
+                                                  "预计负债",
+                                                  "独立账户负债",
+                                                  "资本性负债",
+                                                  "其他认可负债",
+                                                  "认可负债合计",
+                                                  "认可价值",
+                                                  "行次",
+                                                  "期末数",
+                                                  "期初数",
+                                                  "续表"
+                                              ],
+                       "stop_terms":  [
+                                          "S05",
+                                          "最低资本表"
+                                      ],
+                       "minimum_score":  8,
+                       "anchor_min_structure_hits":  2,
+                       "max_pages":  2,
+                       "include_continuation":  true,
+                       "continuation_min_structure_hits":  2,
+                       "continuation_min_numeric_lines":  2,
+                       "continuation_min_score":  5,
+                       "continuation_generic_numeric_lines":  3,
+                       "terminal_terms":  [
+                                              "认可负债合计",
+                                              "认可负债总额",
+                                              "合计"
+                                          ],
+                       "allow_single_row_tail":  true,
+                       "continuation_width_tolerance":  1,
+                       "start_item_terms":  [
+                                                "准备金负债",
+                                                "金融负债",
+                                                "应付及预收款项",
+                                                "认可负债"
+                                            ],
+                       "end_item_terms":  [
+                                              "认可负债合计",
+                                              "认可负债总额",
+                                              "合计"
+                                          ],
+                       "exclude_item_terms":  [],
+                       "canonical_headers":  ["行次", "项目", "期末数", "期初数"],
+                       "prompt_full_table_note":  "本目标为‘S04-认可负债表’，原为两级表头（期末数/期初数 × 账面价值/非认可价值/认可价值）。只保留‘认可价值’口径并输出‘行次/项目/期末数/期初数’，期末数、期初数分别取对应期间的认可价值，不得读取账面价值或非认可价值。按原报告顺序完整提取附件清单中的准备金负债、金融负债、应付及预收款项、预计负债、独立账户负债、资本性负债、其他认可负债及其分项，直至‘认可负债合计’；原文仅写‘合计’时须标准化为‘认可负债合计’，不得混入S05最低资本表。",
+                       "prompt_single_page_note":  "本页可能为‘S04-认可负债表’或续表。原两级表头只保留期末数/期初数下的认可价值列，输出‘行次/项目/期末数/期初数’。逐行保留负债明细至‘认可负债合计’（或‘合计’），续页未重复表头时也不得删行；遇到S05最低资本表立即停止。",
+                       "postprocess_actions":  ["simplify_recognized_liabilities_columns", "normalize_recognized_liabilities_total", "trim_adjacent_rows"],
+                       "completeness_source_item_recall_ratio":  1.0
+                   },
+                   {
                        "table_id":  "THREE_YEAR_INVESTMENT_RETURN",
                        "table_name":  "近三年（综合）投资收益率",
                        "strategy_id":  "life_solvency.three_year_return.v1",

@@ -227,6 +227,22 @@ TABLE_ITEM_BOUNDARIES = {
         "required_items": ("现金及流动性管理工具", "投资资产", "再保险资产"),
         "exclude_items": ("认可负债表", "准备金负债", "金融负债"),
     },
+    "RECOGNIZED_LIABILITIES": {
+        "scope_name": "认可负债",
+        "variant_note": (
+            "从准备金负债等负债明细开始，至认可负债合计（或合计）结束；"
+            "账面价值与非认可价值仅用于核对，主要指标取认可价值。"
+        ),
+        "start_items": (
+            "准备金负债",
+            "金融负债",
+            "应付及预收款项",
+            "认可负债",
+        ),
+        "end_items": ("认可负债合计", "认可负债总额", "合计"),
+        "required_items": ("准备金负债", "金融负债", "应付及预收款项"),
+        "exclude_items": ("最低资本表", "量化风险最低资本", "最低资本"),
+    },
 }
 TABLE_CANONICAL_HEADERS = {
     "SOLVENCY_MAIN": (
@@ -238,6 +254,7 @@ TABLE_CANONICAL_HEADERS = {
     "OPERATING_METRICS": ("指标名称", "本季度数", "本年度累计数"),
     "ACTUAL_CAPITAL": ("行次", "项目", "期末数", "期初数"),
     "RECOGNIZED_ASSETS": ("行次", "项目", "期末数", "期初数"),
+    "RECOGNIZED_LIABILITIES": ("行次", "项目", "期末数", "期初数"),
     "THREE_YEAR_INVESTMENT_RETURN": ("项目", "数值"),
     "MINIMUM_CAPITAL": ("行次", "项目", "期末数", "期初数"),
 }

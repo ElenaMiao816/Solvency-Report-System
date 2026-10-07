@@ -262,6 +262,22 @@ def _company_scale(
     return alt.Scale(domain=domain, range=palette)
 
 
+def _company_legend_order(
+    companies: Iterable[str],
+    colors: Mapping[str, str],
+) -> list[str]:
+    """Use the shared color mapping as the canonical company legend order."""
+    available = list(dict.fromkeys(str(company) for company in companies))
+    available_set = set(available)
+    mapped = [
+        str(company)
+        for company in colors
+        if str(company) in available_set
+    ]
+    mapped_set = set(mapped)
+    return [*mapped, *[company for company in available if company not in mapped_set]]
+
+
 def _facet_layout(company_count: int) -> tuple[int, int, int]:
     """Keep annual-report-style company facets on one fixed-height row.
 
@@ -304,14 +320,23 @@ def _panel_typography(
     return 9, 10, 12
 
 
+def _responsive_bar_fraction(
+    panel_count: int,
+    dense_layout: bool = False,
+) -> float:
+    """Return the responsive share occupied by one bar in its period slot."""
+    count = _panel_density_count(panel_count, dense_layout)
+    return 0.56 if count >= 12 else 0.64 if count >= 8 else 0.68 if count >= 5 else 0.72
+
+
 def _responsive_bar_width(
     panel_count: int,
     dense_layout: bool = False,
 ) -> alt.RelativeBandSize:
     """Narrow bars gradually as more company panels share the same row."""
-    count = _panel_density_count(panel_count, dense_layout)
-    fraction = 0.56 if count >= 12 else 0.64 if count >= 8 else 0.68 if count >= 5 else 0.72
-    return alt.RelativeBandSize(fraction)
+    return alt.RelativeBandSize(
+        _responsive_bar_fraction(panel_count, dense_layout)
+    )
 
 
 def _responsive_grouped_bar_width(
@@ -324,14 +349,24 @@ def _responsive_grouped_bar_width(
     return alt.RelativeBandSize(fraction)
 
 
+def _compact_period_padding(
+    panel_count: int = 1,
+    dense_layout: bool = False,
+) -> float:
+    """Return the inner padding shared by all compact period band scales."""
+    count = _panel_density_count(panel_count, dense_layout)
+    return 0.58 if count >= 12 else 0.54 if count >= 8 else 0.5
+
+
 def _compact_period_scale(
     panel_count: int = 1,
     dense_layout: bool = False,
 ) -> alt.Scale:
     """Keep report-period columns closer together inside every chart panel."""
-    count = _panel_density_count(panel_count, dense_layout)
-    padding = 0.58 if count >= 12 else 0.54 if count >= 8 else 0.5
-    return alt.Scale(paddingInner=padding, paddingOuter=0.5)
+    return alt.Scale(
+        paddingInner=_compact_period_padding(panel_count, dense_layout),
+        paddingOuter=0.5,
+    )
 
 
 def _hidden_value_axis() -> alt.Axis:
@@ -449,7 +484,7 @@ def _build_metric_trend_group(
     group_index: int = 1,
     group_count: int = 1,
 ) -> alt.Chart:
-    companies = list(dict.fromkeys(metric["公司"].astype(str)))
+    companies = _company_legend_order(metric["公司"].astype(str), company_colors)
     scale = _company_scale(companies, company_colors)
     label_format = TREND_LABEL_FORMATS.get(code, ",.2f")
     if code in COMPACT_TREND_SCALE_CODES:
@@ -611,7 +646,7 @@ def build_company_bar_trend_chart(
     period_colors = report_period_color_map(periods)
     company_count = metric["公司"].nunique()
     columns, panel_width, facet_spacing = _facet_layout(company_count)
-    panel_height = 285
+    panel_height = 270 if company_count == 1 else 285
     dense_layout = company_count >= 10
     period_font_size, value_font_size, company_font_size = _panel_typography(
         company_count,
@@ -832,6 +867,35 @@ def solvency_ratio_axis_domain(
     return 0.0, float(upper)
 
 
+def _with_solvency_combo_label_offsets(
+    core: pd.DataFrame,
+    combined: pd.DataFrame,
+    domain: tuple[float, float],
+    value_font_size: int,
+) -> pd.DataFrame:
+    """Place a line label below its point when its bar label is too close."""
+    combined_values = combined[["公司", "报告期", "数值"]].rename(
+        columns={"数值": "综合充足率数值"}
+    ).drop_duplicates(["公司", "报告期"], keep="last")
+    result = core.merge(
+        combined_values,
+        on=["公司", "报告期"],
+        how="left",
+        validate="many_to_one",
+    )
+    domain_span = max(float(domain[1]) - float(domain[0]), 1.0)
+    label_gap_pixels = max(18.0, float(value_font_size) * 2.2 + 4.0)
+    value_gap_pixels = (
+        (result["综合充足率数值"] - result["数值"]).abs()
+        / domain_span
+        * COMPANY_PANEL_HEIGHT
+    )
+    result["label_offset"] = value_gap_pixels.lt(label_gap_pixels).map(
+        {True: value_font_size + 5, False: -10}
+    )
+    return result
+
+
 def build_solvency_ratio_combo_chart(
     frame: pd.DataFrame,
     period_order: Iterable[str],
@@ -866,6 +930,12 @@ def build_solvency_ratio_combo_chart(
     period_font_size, value_font_size, _ = _panel_typography(
         panel_count,
         dense_layout,
+    )
+    core = _with_solvency_combo_label_offsets(
+        core,
+        combined,
+        domain,
+        value_font_size,
     )
     period_scale = _compact_period_scale(panel_count, dense_layout)
     period_colors = report_period_combo_bar_color_map(periods)
@@ -936,7 +1006,7 @@ def build_solvency_ratio_combo_chart(
     )
     line_labels = alt.Chart(core).mark_text(
         tooltip=False,
-        dy=-10,
+        dy=alt.ExprRef(expr="datum.label_offset"),
         fontSize=value_font_size,
         fontWeight="bold",
         color="#000000",
@@ -953,6 +1023,257 @@ def build_solvency_ratio_combo_chart(
             points,
             line_labels,
         ).properties(title=company, height=COMPANY_PANEL_HEIGHT)
+    )
+
+
+def build_solvency_ratio_combo_overview_chart(
+    frame: pd.DataFrame,
+    period_order: Iterable[str],
+    *,
+    company_order: Iterable[str] | None = None,
+    shared_y_domain: tuple[float, float] | None = None,
+    highlight_company: str = "无",
+) -> alt.Chart:
+    """Build all company solvency panels as one responsive Vega-Lite view.
+
+    The former UI rendered one independent chart per company.  Apart from
+    repeating the same pandas work, that forced the browser to initialise many
+    Vega runtimes during every Streamlit rerun.  This grouped chart keeps the
+    same period bars, core-ratio line, shared axis, labels, panel backgrounds,
+    and company ordering while sending only one chart specification.
+    """
+    periods = list(dict.fromkeys(str(period) for period in period_order))
+    codes = ("CORE_SOLVENCY_RATIO", "COMBINED_SOLVENCY_RATIO")
+    metric = convert_multiple_units_to_percent(
+        _clean_numeric(frame[frame["指标编码"].astype(str).isin(codes)])
+    )
+    metric = _with_metric_value_labels(metric, "SOLVENCY_RATIO_COMBO")
+    metric = metric[metric["报告期"].astype(str).isin(periods)].copy()
+    discovered_companies = list(dict.fromkeys(metric["公司"].dropna().astype(str)))
+    requested_companies = (
+        list(dict.fromkeys(str(company) for company in company_order))
+        if company_order is not None
+        else discovered_companies
+    )
+    companies = [company for company in requested_companies if company in discovered_companies]
+    if not companies or metric.empty:
+        raise ValueError("核心及综合充足率缺少可绘制的数据。")
+    metric = metric[metric["公司"].astype(str).isin(companies)].copy()
+    metric["_报告期顺序"] = metric["报告期"].astype(str).map(
+        {period: index for index, period in enumerate(periods)}
+    )
+
+    domain = shared_y_domain or solvency_ratio_axis_domain(metric, periods)
+    overview_height = COMPANY_PANEL_HEIGHT + 90
+    plot_top = 72
+    plot_bottom = overview_height - 42
+    y_scale = alt.Scale(
+        domain=list(domain),
+        range=[plot_bottom, plot_top],
+        zero=True,
+        nice=False,
+    )
+    panel_count = len(companies)
+    dense_layout = panel_count >= 10
+    period_font_size, value_font_size, company_font_size = _panel_typography(
+        panel_count,
+        dense_layout,
+    )
+    company_positions = {company: index for index, company in enumerate(companies)}
+    period_positions = {period: index for index, period in enumerate(periods)}
+    period_padding_inner = _compact_period_padding(panel_count, dense_layout)
+    period_padding_outer = 0.5
+    period_step = 1.0 / (
+        len(periods)
+        - period_padding_inner
+        + 2 * period_padding_outer
+    )
+    period_band_width = period_step * (1 - period_padding_inner)
+    metric["_面板序号"] = metric["公司"].astype(str).map(company_positions)
+    metric["_横轴中心"] = (
+        metric["_面板序号"]
+        + period_step * period_padding_outer
+        + metric["报告期"].astype(str).map(period_positions) * period_step
+        + period_band_width / 2
+    )
+    bar_width = period_band_width * _responsive_bar_fraction(
+        panel_count,
+        dense_layout,
+    )
+    metric["_柱左"] = metric["_横轴中心"] - bar_width / 2
+    metric["_柱右"] = metric["_横轴中心"] + bar_width / 2
+    combined = metric[
+        metric["指标编码"].astype(str).eq("COMBINED_SOLVENCY_RATIO")
+    ].copy()
+    core = metric[
+        metric["指标编码"].astype(str).eq("CORE_SOLVENCY_RATIO")
+    ].copy()
+    core_offsets = _with_solvency_combo_label_offsets(
+        core,
+        combined,
+        domain,
+        value_font_size,
+    )[["公司", "报告期", "label_offset"]]
+    metric = metric.merge(
+        core_offsets,
+        on=["公司", "报告期"],
+        how="left",
+        validate="many_to_one",
+    )
+
+    panel_rows = pd.DataFrame(
+        {
+            "公司": companies,
+            "面板序号": range(len(companies)),
+            "_面板左": [index + 0.04 for index in range(len(companies))],
+            "_面板右": [index + 0.96 for index in range(len(companies))],
+            "_面板中心": [index + 0.5 for index in range(len(companies))],
+        }
+    )
+    period_colors = report_period_combo_bar_color_map(periods)
+    horizontal_scale = alt.Scale(
+        domain=[0.0, float(panel_count)],
+        zero=False,
+        nice=False,
+    )
+    center_x = alt.X(
+        "_横轴中心:Q",
+        title=None,
+        scale=horizontal_scale,
+        axis=None,
+    )
+    value_tooltip = alt.Tooltip("数值:Q", format=",.0f")
+
+    backgrounds = alt.Chart(panel_rows).mark_rect(
+        stroke=ANNUAL_REPORT_PANEL_BORDER,
+        strokeWidth=1,
+        tooltip=False,
+    ).encode(
+        x=alt.X("_面板左:Q", title=None, scale=horizontal_scale, axis=None),
+        x2=alt.X2("_面板右:Q"),
+        y=alt.value(0),
+        y2=alt.value(overview_height),
+        color=alt.condition(
+            "datum['面板序号'] % 2 === 1",
+            alt.value("rgba(200,200,200,0.12)"),
+            alt.value(TRANSPARENT),
+        ),
+    )
+    company_titles = alt.Chart(panel_rows).mark_text(
+        tooltip=False,
+        baseline="top",
+        fontSize=company_font_size,
+        fontWeight="bold",
+        color="#00338D",
+    ).encode(
+        x=alt.X("_面板中心:Q", title=None, scale=horizontal_scale, axis=None),
+        y=alt.value(18),
+        text=alt.Text("公司:N"),
+    )
+    bars = (
+        alt.Chart(metric)
+        .transform_filter(alt.datum["指标编码"] == "COMBINED_SOLVENCY_RATIO")
+        .mark_bar(
+            orient="vertical",
+            opacity=0.9,
+            cornerRadiusTopLeft=2,
+            cornerRadiusTopRight=2,
+        )
+        .encode(
+            x=alt.X("_柱左:Q", title=None, scale=horizontal_scale, axis=None),
+            x2=alt.X2("_柱右:Q"),
+            y=alt.Y("数值:Q", title=None, axis=_hidden_value_axis(), scale=y_scale),
+            y2=alt.Y2(datum=0),
+            color=alt.Color(
+                "报告期:N",
+                scale=alt.Scale(
+                    domain=periods,
+                    range=[period_colors[period] for period in periods],
+                ),
+                legend=None,
+            ),
+            tooltip=["公司:N", "报告期:N", "指标名称:N", value_tooltip, "单位:N"],
+        )
+    )
+    bar_labels = (
+        alt.Chart(metric)
+        .transform_filter(alt.datum["指标编码"] == "COMBINED_SOLVENCY_RATIO")
+        .mark_text(
+            tooltip=False,
+            dy=-7,
+            fontSize=value_font_size,
+            fontWeight="bold",
+            color="#000000",
+        )
+        .encode(
+            x=center_x,
+            y=alt.Y("数值:Q", scale=y_scale),
+            text=alt.Text("数值标签:N"),
+        )
+    )
+    core_rows = alt.Chart(metric).transform_filter(
+        alt.datum["指标编码"] == "CORE_SOLVENCY_RATIO"
+    )
+    line = core_rows.mark_line(
+        color="#FD349C",
+        strokeWidth=2.6,
+    ).encode(
+        x=center_x,
+        y=alt.Y("数值:Q", axis=None, scale=y_scale),
+        detail=alt.Detail("公司:N"),
+        order=alt.Order("_报告期顺序:Q", sort="ascending"),
+        tooltip=["公司:N", "报告期:N", "指标名称:N", value_tooltip, "单位:N"],
+    )
+    points = core_rows.mark_point(
+        color="#FD349C",
+        filled=True,
+        size=54,
+    ).encode(
+        x=center_x,
+        y=alt.Y("数值:Q", axis=None, scale=y_scale),
+        tooltip=["公司:N", "报告期:N", "指标名称:N", value_tooltip, "单位:N"],
+    )
+    line_labels = core_rows.mark_text(
+        tooltip=False,
+        dy=alt.ExprRef(expr="datum.label_offset"),
+        fontSize=value_font_size,
+        fontWeight="bold",
+        color="#000000",
+    ).encode(
+        x=center_x,
+        y=alt.Y("数值:Q", axis=None, scale=y_scale),
+        text=alt.Text("数值标签:N"),
+    )
+    period_labels = (
+        alt.Chart(metric)
+        .transform_filter(alt.datum["指标编码"] == "COMBINED_SOLVENCY_RATIO")
+        .mark_text(
+            tooltip=False,
+            dy=15,
+            baseline="top",
+            fontSize=period_font_size,
+            color="#0C233C",
+        )
+        .encode(
+            x=center_x,
+            y=alt.value(plot_bottom),
+            text=alt.Text("报告期:N"),
+        )
+    )
+    return _transparent(
+        alt.layer(
+            backgrounds,
+            company_titles,
+            bars,
+            bar_labels,
+            line,
+            points,
+            line_labels,
+            period_labels,
+        ).properties(
+            height=overview_height,
+            padding={"top": 0, "bottom": 0, "left": 0, "right": 0},
+        )
     )
 
 
@@ -1412,6 +1733,52 @@ def component_stack_proportion_axis_domain(
     return float(padded_lower), float(padded_upper)
 
 
+def _with_component_stack_label_offsets(
+    rows: pd.DataFrame,
+    stack_domain: tuple[float, float],
+    value_font_size: int,
+    panel_height: int,
+) -> pd.DataFrame:
+    """Move labels out of stack segments that are too short on screen."""
+    result = rows.copy()
+    result["label_offset"] = 0.0
+    domain_span = max(float(stack_domain[1]) - float(stack_domain[0]), 1e-12)
+    segment_pixels = (
+        (result["堆叠终点"] - result["堆叠起点"]).abs()
+        / domain_span
+        * panel_height
+    )
+    label_height = max(14.0, float(value_font_size) + 6.0)
+    external = result["占比标签"].fillna("").ne("") & segment_pixels.lt(label_height)
+    if not external.any():
+        return result
+
+    group_keys = [result["公司"], result["报告期"]]
+    positive_top = result["堆叠终点"].where(result["堆叠终点"].gt(0), 0).groupby(
+        group_keys,
+        sort=False,
+    ).transform("max")
+    negative_bottom = result["堆叠终点"].where(result["堆叠终点"].lt(0), 0).groupby(
+        group_keys,
+        sort=False,
+    ).transform("min")
+    positive_external = external & result["堆叠终点"].ge(0)
+    negative_external = external & result["堆叠终点"].lt(0)
+    positive_rank = positive_external.groupby(group_keys, sort=False).cumsum()
+    negative_rank = negative_external.groupby(group_keys, sort=False).cumsum()
+
+    result.loc[positive_external, "标签位置"] = positive_top[positive_external]
+    result.loc[positive_external, "label_offset"] = (
+        -label_height * positive_rank[positive_external]
+    )
+    result.loc[negative_external, "标签位置"] = negative_bottom[negative_external]
+    result.loc[negative_external, "label_offset"] = (
+        label_height * negative_rank[negative_external]
+    )
+    result.loc[external, "标签颜色"] = "#0C233C"
+    return result
+
+
 def build_component_stack_chart(
     frame: pd.DataFrame,
     component_specs: Iterable[tuple[str, str, str]],
@@ -1429,6 +1796,7 @@ def build_component_stack_chart(
     min_label_share: float | None = None,
     hide_labels_at_threshold: bool = False,
     show_small_negative_labels: bool = False,
+    avoid_label_overlap: bool = False,
 ) -> alt.Chart:
     """Build a signed component stack with KPMG-only semantic colors."""
     label_share_threshold = (
@@ -1521,6 +1889,7 @@ def build_component_stack_chart(
         density_count,
         dense_layout,
     )
+    panel_height = 285
     period_scale = _compact_period_scale(density_count, dense_layout)
     stack_domain = shared_y_domain or (
         component_stack_proportion_axis_domain(
@@ -1541,6 +1910,15 @@ def build_component_stack_chart(
         )
     )
     y_scale = alt.Scale(domain=list(stack_domain), zero=True, nice=False)
+    if avoid_label_overlap:
+        rows = _with_component_stack_label_offsets(
+            rows,
+            stack_domain,
+            value_font_size,
+            panel_height,
+        )
+    else:
+        rows["label_offset"] = 0.0
     rows["小额负值注释"] = False
     if plot_proportions and show_small_negative_labels:
         small_negative = rows["绘图占比"].lt(0) & rows["绘图占比"].abs().lt(MIN_INSIDE_LABEL_SHARE)
@@ -1555,7 +1933,6 @@ def build_component_stack_chart(
         )
         rows.loc[small_negative, "标签颜色"] = "#0C233C"
         rows["注释引线终点"] = rows["标签位置"] + label_step * 0.3
-    panel_height = 285
     base = alt.Chart()
     tooltips: list[alt.Tooltip | str] = [
         "公司:N",
@@ -1601,6 +1978,7 @@ def build_component_stack_chart(
         fontSize=value_font_size,
         fontWeight="bold",
         baseline="middle",
+        dy=alt.ExprRef(expr="datum.label_offset"),
     ).encode(
         x=alt.X("报告期:N", sort=periods, scale=period_scale),
         y=alt.Y("标签位置:Q", scale=y_scale),
@@ -1610,7 +1988,7 @@ def build_component_stack_chart(
     zero = alt.Chart(pd.DataFrame({"零线": [0]})).mark_rule(
         color="#0C233C", strokeWidth=1
     ).encode(y=alt.Y("零线:Q", scale=y_scale))
-    layers = [bars, labels_chart, zero]
+    layers = [bars, zero, labels_chart]
     if plot_proportions and show_small_negative_labels:
         leaders = base.transform_filter(alt.datum["小额负值注释"]).mark_rule(
             color="#65758B", strokeWidth=1,
@@ -1626,7 +2004,7 @@ def build_component_stack_chart(
         company = str(rows["公司"].dropna().astype(str).iloc[0])
         return _transparent(
             alt.layer(*layers, data=rows).properties(
-                height=270,
+                height=panel_height,
                 title=company,
             )
         )
@@ -2012,7 +2390,7 @@ def build_capital_efficiency_bubble_chart(
     ).reset_index(drop=True)
 
     pivot["是否追踪"] = pivot["公司"].astype(str).eq(highlight)
-    companies = list(dict.fromkeys(pivot["公司"].astype(str)))
+    companies = _company_legend_order(pivot["公司"].astype(str), company_colors)
     company_scale = _company_scale(companies, company_colors)
     company_legend = (
         alt.Legend(

@@ -116,6 +116,60 @@ class QualityChartStyleTests(unittest.TestCase):
         quality_bar = next(mark for mark in marks(quality) if mark["mark"]["type"] == "bar")
         self.assertEqual(quality_bar["encoding"]["color"]["scale"]["range"][-1], "#098E7E")
 
+    def test_business_combo_and_ratio_bars_share_solvency_period_colors(self):
+        frame, periods, combo = self.combo()
+        expected = [
+            report_period_combo_bar_color_map(periods)[period]
+            for period in periods
+        ]
+        solvency = build_solvency_ratio_combo_chart(frame, periods).to_dict()
+        solvency_bar = next(mark for mark in marks(solvency) if mark["mark"]["type"] == "bar")
+
+        business = company_quality_chart(
+            combo, "甲公司", 7, unit="亿元", color_by_period=True,
+        ).to_dict()
+        business_bar = next(mark for mark in marks(business) if mark["mark"]["type"] == "bar")
+
+        self.assertEqual(solvency_bar["encoding"]["color"]["scale"]["range"], expected)
+        self.assertEqual(business_bar["encoding"]["color"]["scale"]["range"], expected)
+        business_label = next(
+            mark for mark in marks(business) if mark["mark"]["type"] == "text"
+        )
+        self.assertEqual(business_label["mark"]["color"], "#000000")
+
+        for chart_name in ("保险合同负债/总负债", "保险业务收入/签单保费"):
+            with self.subTest(chart_name=chart_name):
+                ratio_figure = go.Figure([
+                    go.Bar(
+                        x=periods,
+                        y=[80, 82, 85],
+                        name=chart_name,
+                        marker_color="#1E49E2",
+                    )
+                ])
+                ratio_figure.update_xaxes(
+                    tickmode="array", tickvals=periods, ticktext=periods
+                )
+                ratio_figure.update_yaxes(range=[0, 94])
+                ratio = company_quality_chart(
+                    ratio_figure,
+                    "甲公司",
+                    7,
+                    unit="%",
+                    percentage_bar=True,
+                    color_by_period=True,
+                ).to_dict()
+                ratio_bar = next(
+                    mark for mark in marks(ratio) if mark["mark"]["type"] == "bar"
+                )
+                ratio_label = next(
+                    mark for mark in marks(ratio) if mark["mark"]["type"] == "text"
+                )
+                self.assertEqual(
+                    ratio_bar["encoding"]["color"]["scale"]["range"], expected
+                )
+                self.assertEqual(ratio_label["mark"]["color"], "#000000")
+
     def test_stack_preserves_signed_bounds_and_does_not_invent_missing_values(self):
         fig = go.Figure([
             go.Bar(x=["2025Q3", "2026Q1"], y=[20, None], name="甲项", marker_color="#00B8F5"),

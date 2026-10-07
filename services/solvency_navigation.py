@@ -11,7 +11,9 @@ OVERVIEW_LEVEL = "行业整体偿付能力概览"
 COMPANY_OVERVIEW_LEVEL = "关键偿付数据概览"
 ACTUAL_CAPITAL_LEVEL = "实际资本数据对比"
 MINIMUM_CAPITAL_LEVEL = "最低资本数据对比"
-RECOGNIZED_ASSETS_LEVEL = "认可资产数据对比"
+RECOGNIZED_ASSET_LIABILITY_LEVEL = "认可资产负债数据对比"
+# Backward-compatible import name used by existing integrations and tests.
+RECOGNIZED_ASSETS_LEVEL = RECOGNIZED_ASSET_LIABILITY_LEVEL
 OPERATING_QUALITY_LEVEL = "主要经营指标对比"
 APPENDIX_LEVEL = "附录"
 MARKET_RISK_ASSET_SCATTER = "利率与权益价格风险占认可资产率气泡图"
@@ -300,7 +302,7 @@ COMPANY_NAVIGATION: tuple[NavigationEntry, ...] = (
     NavigationEntry(MINIMUM_CAPITAL_LEVEL, "信用风险", "利差风险/认可资产率", ("SPREAD_RISK_TO_ASSETS",)),
     NavigationEntry(MINIMUM_CAPITAL_LEVEL, "信用风险", "对手违约风险/认可资产率", ("COUNTERPARTY_RISK_TO_ASSETS",)),
     NavigationEntry(
-        RECOGNIZED_ASSETS_LEVEL,
+        RECOGNIZED_ASSET_LIABILITY_LEVEL,
         "资产构成情况",
         "认可资产构成",
         (
@@ -312,8 +314,33 @@ COMPANY_NAVIGATION: tuple[NavigationEntry, ...] = (
         ),
         True,
     ),
+    NavigationEntry(
+        RECOGNIZED_ASSET_LIABILITY_LEVEL,
+        "负债构成情况",
+        "认可负债构成",
+        (
+            "RESERVE_LIABILITIES", "FINANCIAL_LIABILITIES",
+            "PAYABLES_AND_ADVANCES", "PROVISIONS",
+            "SEPARATE_ACCOUNT_LIABILITY", "CAPITAL_LIABILITIES",
+            "OTHER_RECOGNIZED_LIABILITIES",
+        ),
+    ),
+    NavigationEntry(
+        OPERATING_QUALITY_LEVEL, "业务质量指标", "保险合同负债/总负债",
+        ("INSURANCE_CONTRACT_LIABILITY_TO_TOTAL_LIABILITIES", "INSURANCE_CONTRACT_LIABILITY", "TOTAL_ASSETS", "NET_ASSETS"),
+        always_available=True,
+    ),
+    NavigationEntry(
+        OPERATING_QUALITY_LEVEL, "业务质量指标", "保险业务收入/签单保费",
+        ("INSURANCE_REVENUE_TO_SIGNED_PREMIUM", "INSURANCE_REVENUE", "SIGNED_PREMIUM"),
+        always_available=True,
+    ),
     NavigationEntry(OPERATING_QUALITY_LEVEL, "业务质量指标", "签单保费与新业务利润率", ("SIGNED_PREMIUM", "NEW_BUSINESS_MARGIN"), always_available=True),
-    NavigationEntry(OPERATING_QUALITY_LEVEL, "业务质量指标", "新业务价值与新业务价值率", ("NEW_BUSINESS_VALUE", "SIGNED_PREMIUM"), always_available=True),
+    NavigationEntry(
+        OPERATING_QUALITY_LEVEL, "业务质量指标", "新业务价值与新业务价值率",
+        ("NEW_BUSINESS_VALUE", "NEW_BUSINESS_VALUE_RATE", "SIGNED_PREMIUM", "RENEWAL_PREMIUM"),
+        always_available=True,
+    ),
     NavigationEntry(OPERATING_QUALITY_LEVEL, "业务质量指标", "综合退保率", ("SURRENDER_RATE",), always_available=True),
     NavigationEntry(OPERATING_QUALITY_LEVEL, "投资质量指标", "投资质量六指标雷达图", ("ROE", "ROA", "INVESTMENT_RETURN", "COMPREHENSIVE_INVESTMENT_RETURN", "THREE_YEAR_AVG_INVESTMENT_RETURN", "THREE_YEAR_AVG_COMPREHENSIVE_INVESTMENT_RETURN"), always_available=True),
     NavigationEntry(OPERATING_QUALITY_LEVEL, "投资质量指标", "累计投资收益率与累计综合投资收益率", ("INVESTMENT_RETURN", "COMPREHENSIVE_INVESTMENT_RETURN"), always_available=True),

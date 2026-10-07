@@ -117,7 +117,12 @@ class HengqinLocatorTests(unittest.TestCase):
             run = locate_tables_vlm_v2(Path(r'F:\CROSS\V1\横琴人寿2026Q1偿付能力季度报告摘要.pdf').read_bytes(), configs, minimal_taxonomy(), **kwargs)
         else:
             sheets = [(tuple(range(i, min(i + 6, 31))), 'data:image/jpeg;base64,test') for i in range(1, 31, 6)]
-            with patch('services.solvency_vlm_v2_pipeline.render_vlm_v2_contact_sheets', return_value=sheets) as render:
+            review = lambda data, pages: [
+                (tuple(pages[i:i + 2]), 'data:image/jpeg;base64,test')
+                for i in range(0, len(pages), 2)
+            ]
+            with patch('services.solvency_vlm_v2_pipeline.render_vlm_v2_contact_sheets', return_value=sheets) as render, \
+                 patch('services.solvency_vlm_v2_pipeline.render_review_sheets', side_effect=review):
                 run = locate_tables_vlm_v2(b'cached', configs, minimal_taxonomy(), **kwargs)
                 self.assertEqual(render.call_count, 1)
         return run, calls
@@ -125,7 +130,7 @@ class HengqinLocatorTests(unittest.TestCase):
     def test_primary_tables_selected_summaries_retained_as_auxiliary(self):
         run, calls = self.run_case()
         self.assertEqual({m.table_id: m.pages for m in run.matches}, EXPECTED)
-        self.assertEqual(run.model_calls, 5)
+        self.assertEqual(run.model_calls, 6)
         self.assertFalse(any(m.review_required for m in run.matches))
         capital = next(m for m in run.matches if m.table_id == 'ACTUAL_CAPITAL')
         self.assertEqual(capital.sources['vlm_summary'], [12])
@@ -134,14 +139,14 @@ class HengqinLocatorTests(unittest.TestCase):
     def test_screenshot_legacy_results_are_filtered_and_missing_tail_reviewed(self):
         run, calls = self.run_case(legacy=True)
         self.assertEqual({m.table_id: m.pages for m in run.matches}, EXPECTED)
-        self.assertEqual(run.model_calls, 6)
+        self.assertEqual(run.model_calls, 7)
         focused = [call for call in calls if call[1] == ['OPERATING_METRICS']]
         self.assertEqual(focused, [([13, 14, 15, 16, 17, 18], ['OPERATING_METRICS'])])
 
     def test_one_bounded_recheck_recovers_missing_operating_page(self):
         run, calls = self.run_case(omit_tail=True)
         self.assertEqual({m.table_id: m.pages for m in run.matches}, EXPECTED)
-        self.assertEqual(run.model_calls, 6)
+        self.assertEqual(run.model_calls, 7)
 
     def test_boundary_timeout_keeps_success_and_requests_manual_review(self):
         run, calls = self.run_case(omit_tail=True, boundary_timeout=True)
@@ -149,7 +154,7 @@ class HengqinLocatorTests(unittest.TestCase):
         self.assertEqual(operating.pages, [13, 14])
         self.assertTrue(operating.review_required)
         self.assertIn('边界复核失败', operating.review_reason)
-        self.assertEqual(run.model_calls, 6)
+        self.assertEqual(run.model_calls, 7)
 
     @unittest.skipUnless(Path(r'F:\CROSS\V1\横琴人寿2026Q1偿付能力季度报告摘要.pdf').exists(), 'Local PDF unavailable')
     def test_real_pdf_rendering_with_controlled_visual_responses(self):

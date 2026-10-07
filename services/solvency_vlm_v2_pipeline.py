@@ -36,11 +36,12 @@ from .solvency_unit_context import (
     model_unit_context, apply_unit_context, apply_item_unit_evidence,
 )
 from .solvency_locator_recovery import (
-    DETAIL_IDS, bounded_review_pages, latest_scan_failures,
+    RECOVERY_IDS, bounded_review_pages, latest_scan_failures,
     operating_section_closed, text_page_catalog, render_review_sheets,
 )
 from .solvency_metric_registry import CUSTOM_METRICS_BY_CODE
 from .solvency_operating_recovery import recover_insurance_revenue, recover_surrender_rate
+from .solvency_main_recovery import recover_solvency_main_metrics
 
 
 LOCATOR_MODE = "VLM v2全页视觉定位"
@@ -78,6 +79,10 @@ _TABLE_DESCRIPTIONS = {
         "认可资产构成明细，通常含账面价值、非认可价值、认可价值等多级表头，"
         "从现金及流动性管理工具等资产类别到认可资产合计。"
     ),
+    "RECOGNIZED_LIABILITIES": (
+        "认可负债构成明细，通常含账面价值、非认可价值、认可价值等多级表头，"
+        "从准备金负债等负债类别及分项到认可负债合计。"
+    ),
     "THREE_YEAR_INVESTMENT_RETURN": (
         "近三年平均投资收益率和近三年平均综合投资收益率，可能是两行表格、同页两句话"
         "或相邻页文字；普通本季度投资收益率不是本目标。"
@@ -93,6 +98,7 @@ _TABLE_MODULES = {
     "OPERATING_METRICS": {"经营指标"},
     "ACTUAL_CAPITAL": {"实际资本"},
     "RECOGNIZED_ASSETS": {"认可资产"},
+    "RECOGNIZED_LIABILITIES": {"认可负债"},
     "MINIMUM_CAPITAL": {"最低资本"},
 }
 
@@ -100,6 +106,7 @@ _TABLE_EXTRA_CODES = {
     "REGISTERED_CAPITAL": {"REGISTERED_CAPITAL"},
     "ACTUAL_CAPITAL": {"ACTUAL_CAPITAL"},
     "RECOGNIZED_ASSETS": {"RECOGNIZED_ASSETS"},
+    "RECOGNIZED_LIABILITIES": {"RECOGNIZED_LIABILITIES"},
     "MINIMUM_CAPITAL": {"MINIMUM_CAPITAL"},
     "THREE_YEAR_INVESTMENT_RETURN": {
         "INVESTMENT_RETURN", "COMPREHENSIVE_INVESTMENT_RETURN",
@@ -121,6 +128,10 @@ _REQUIRED_CODES = {
         "CASH_LIQUID_ASSETS", "INVESTMENT_ASSETS", "REINSURANCE_ASSETS",
         "RECOGNIZED_ASSETS",
     },
+    "RECOGNIZED_LIABILITIES": {
+        "RESERVE_LIABILITIES", "FINANCIAL_LIABILITIES",
+        "PAYABLES_AND_ADVANCES", "RECOGNIZED_LIABILITIES",
+    },
     "THREE_YEAR_INVESTMENT_RETURN": {
         "INVESTMENT_RETURN", "COMPREHENSIVE_INVESTMENT_RETURN",
     },
@@ -130,6 +141,8 @@ _REQUIRED_CODES = {
         "MINIMUM_CAPITAL",
     },
 }
+
+_RECOGNIZED_VALUE_TABLES = {"RECOGNIZED_ASSETS", "RECOGNIZED_LIABILITIES"}
 
 _THREE_YEAR_METRIC_NAMES = {
     "INVESTMENT_RETURN": "近三年平均投资收益率",
@@ -847,7 +860,7 @@ def locate_tables_vlm_v2(
     page_count = sum(len(pages) for pages, _ in sheets)
     recovery_ranges = {
         card.table_id: bounded_review_pages(card.table_id, candidate_hits[card.table_id], catalog, page_count)
-        for card in cards if card.table_id in DETAIL_IDS
+        for card in cards if card.table_id in RECOVERY_IDS
     }
     recovery_pages = sorted({p for pages in recovery_ranges.values() for p in pages})[:12]
     if recovery_pages:
@@ -934,7 +947,7 @@ def _metric_prompt(
     metric_codes: set[str] | None = None,
     retry_reason: str = "",
 ) -> str:
-    sparse_response = card.table_id in {"ACTUAL_CAPITAL", "RECOGNIZED_ASSETS", "MINIMUM_CAPITAL", "OPERATING_METRICS"}
+    sparse_response = card.table_id in {"ACTUAL_CAPITAL", "RECOGNIZED_ASSETS", "RECOGNIZED_LIABILITIES", "MINIMUM_CAPITAL", "OPERATING_METRICS"}
     payload = card.prompt_payload(
         metric_codes=metric_codes,
         compact=sparse_response,
@@ -980,9 +993,10 @@ def _metric_prompt(
             '凭空补出横杠。实际资本合计不是净资产。'
             '同表跨页时沿用输入首页明确标注的原始单位；保留实际行标签和期末列表头。'
         )
-    elif card.table_id == 'RECOGNIZED_ASSETS':
+    elif card.table_id in _RECOGNIZED_VALUE_TABLES:
+        subject = '认可资产' if card.table_id == 'RECOGNIZED_ASSETS' else '认可负债'
         period_rule = (
-            '3. 认可资产只取本季度末/期末的认可价值，不能读取账面价值、非认可价值或期初列。'
+            f'3. {subject}只取本季度末/期末的认可价值，不能读取账面价值、非认可价值或期初列。'
             '失败页恢复时会按指标小批提取，每次只返回本批target_metrics，不要补写其他批次。'
             '同表续页没有单位时，沿用输入图片中该表首页明确标注的单位；'
             '明确的0和横杠必须返回disclosed_zero，不能因金额为零省略指标。'
@@ -999,6 +1013,13 @@ def _metric_prompt(
             '两者是独立指标，禁止把1*复制给行1或把行1复制给1*。'
             'source_label须逐字保留括号内限定语，row_header_path须保留实际行次；'
             '找不到目标行就省略，不得拿另一行代替；不得用推算或跨表数值覆盖原始读数。'
+        )
+    elif card.table_id == "THREE_YEAR_INVESTMENT_RETURN":
+        period_rule = (
+            "3. 只读取原文明确写出的‘近三年平均投资收益率’和‘近三年平均综合投资收益率’，"
+            "不能读取同页普通本季度或本年累计投资收益率。period_label写‘近三年平均’。"
+            "source_label必须逐字保留对应完整指标名称；evidence_text必须包含该完整名称和"
+            "紧邻的百分比原值。即使数值已识别，也不得省略这两个证据字段。"
         )
     elif card.table_id == "REGISTERED_CAPITAL":
         period_rule = (
@@ -1128,6 +1149,43 @@ def _normalized_model_status(item: Mapping[str, object], metric_id: str) -> str:
     return normalized
 
 
+def _repair_three_year_evidence(
+    item: Mapping[str, object],
+    metric_id: str,
+) -> dict[str, object]:
+    """Complete evidence fields only when the model already quoted the exact label."""
+    result = dict(item)
+    target = _THREE_YEAR_METRIC_NAMES.get(metric_id, "")
+    if not target or _normalized_model_status(result, metric_id) not in {
+        "found", "disclosed_zero", "disclosed_na",
+    }:
+        return result
+    source_label = _clean(result.get("source_label"))
+    evidence = _clean(result.get("evidence_text"))
+    raw_value = _clean(result.get("value_raw"))
+    try:
+        page = int(result.get("page", 0) or 0)
+    except (TypeError, ValueError):
+        page = 0
+    if page <= 0:
+        return result
+    if _normalized_model_status(result, metric_id) in {"found", "disclosed_zero"} and not re.fullmatch(
+        r"[-+]?\d[\d,，]*(?:\.\d+)?[%％]", raw_value,
+    ):
+        return result
+    if target not in source_label and target not in evidence:
+        return result
+    if not source_label:
+        result["source_label"] = target
+    if not evidence and raw_value:
+        result["evidence_text"] = f"{target} {raw_value}"
+    if not _path_text(result.get("row_header_path")):
+        result["row_header_path"] = [target]
+    if not _clean(result.get("period_label")):
+        result["period_label"] = "近三年平均"
+    return result
+
+
 def _candidate_rank(
     item: Mapping[str, object],
     metric_id: str,
@@ -1156,7 +1214,7 @@ def _candidate_rank(
     semantic_rank = int(not quant_risk_source_error(
         metric_id, item.get('source_label'), item.get('row_header_path'), item.get('evidence_text'),
     ))
-    if table_id == 'RECOGNIZED_ASSETS' and recognized_column_error(item.get('column_header_path')):
+    if table_id in _RECOGNIZED_VALUE_TABLES and recognized_column_error(item.get('column_header_path')):
         semantic_rank = 0
     return semantic_rank, period_rank, status_rank, confidence, evidence_length
 
@@ -1200,7 +1258,7 @@ def _merge_page_records(records):
         def rank(row):
             return (int(not quant_risk_source_error(row['指标编码'], row.get('原始标签'),
                         row.get('行表头路径'), row.get('证据原文'))
-                        and not (row['目标表ID'] == 'RECOGNIZED_ASSETS'
+                        and not (row['目标表ID'] in _RECOGNIZED_VALUE_TABLES
                                  and recognized_column_error(row.get('列表头路径')))), priority.get(row['状态'], 0))
         if previous is None or rank(record) > rank(previous):
             selected[key] = record
@@ -1262,7 +1320,7 @@ def _extract_card_records(
     # S03 normally stays at one request per physical page. Repeating the same
     # 49-target request is ineffective when a dense continuation page fails,
     # so only that failed page is recovered with bounded target batches.
-    split_failed_recognized_page = card.table_id == 'RECOGNIZED_ASSETS' and retry
+    split_failed_recognized_page = card.table_id in _RECOGNIZED_VALUE_TABLES and retry
     if split_metrics and (split_on_first_pass or split_failed_recognized_page):
         # Limit output, not the table context: the continuation page may omit
         # its unit. Keep confirmed pages together and reuse their cached images.
@@ -1272,13 +1330,12 @@ def _extract_card_records(
             'OPERATING_METRICS': 8,
             'ACTUAL_CAPITAL': 10,
             'RECOGNIZED_ASSETS': 10,
+            'RECOGNIZED_LIABILITIES': 10,
         }.get(card.table_id, 12)
         numeric_metrics = [metric for metric in selected_metrics if metric['metric_id'] not in TEXT_FILING_CODES]
         chunks = []
-        if card.table_id in {'ACTUAL_CAPITAL', 'RECOGNIZED_ASSETS'}:
-            core_codes = _REQUIRED_CODES['ACTUAL_CAPITAL']
-            if card.table_id == 'RECOGNIZED_ASSETS':
-                core_codes = _REQUIRED_CODES['RECOGNIZED_ASSETS']
+        if card.table_id in {'ACTUAL_CAPITAL', 'RECOGNIZED_ASSETS', 'RECOGNIZED_LIABILITIES'}:
+            core_codes = _REQUIRED_CODES.get(card.table_id, _REQUIRED_CODES['ACTUAL_CAPITAL'])
             core_metrics = [metric for metric in numeric_metrics if metric['metric_id'] in core_codes]
             if core_metrics:
                 chunks.append(core_metrics)
@@ -1304,6 +1361,39 @@ def _extract_card_records(
                 calls += count
             except (requests.RequestException, RuntimeError) as exc:
                 calls += getattr(exc, 'call_count', 1)
+                # A dense S05 batch can repeatedly exceed a provider's output
+                # or time limit. On the retry round, make one bounded adaptive
+                # recovery pass with half-sized batches.
+                if retry and card.table_id == 'MINIMUM_CAPITAL' and len(chunk) > 6:
+                    for sub_start in range(0, len(chunk), 6):
+                        sub_chunk = chunk[sub_start:sub_start + 6]
+                        sub_codes = {_clean(metric['metric_id']) for metric in sub_chunk}
+                        try:
+                            rows, count = _extract_card_records(
+                                pdf_bytes, match, card, api_key=api_key, base_url=base_url,
+                                model=model, timeout=timeout,
+                                request_max_attempts=request_max_attempts,
+                                post_func=post_func, metric_codes=sub_codes,
+                                retry_reason=retry_reason, retry=retry,
+                                page_image_cache=page_image_cache,
+                                max_pages_per_request=max_pages_per_request,
+                                split_metrics=False,
+                                unit_context_pages=unit_context_pages,
+                                recognized_view_cache=recognized_view_cache,
+                                visible_policy_codes=visible_policy_codes,
+                            )
+                            completed.extend(rows)
+                            calls += count
+                        except (requests.RequestException, RuntimeError) as sub_exc:
+                            calls += getattr(sub_exc, 'call_count', 1)
+                            if isinstance(sub_exc, _PartialPageFailure):
+                                completed.extend(
+                                    row for row in sub_exc.records
+                                    if row['状态'] != 'not_disclosed'
+                                )
+                            failed_codes.update(sub_codes)
+                            errors.append(sub_exc)
+                    continue
                 if isinstance(exc, _PartialPageFailure):
                     completed.extend(row for row in exc.records if row['状态'] != 'not_disclosed')
                 failed_codes.update(codes)
@@ -1311,11 +1401,14 @@ def _extract_card_records(
         if failed_codes:
             raise _PartialMetricFailure(failed_codes, completed, calls, errors, card.table_name)
         return completed, calls
-    batch_size = 1 if card.table_id == 'RECOGNIZED_ASSETS' else max(1, int(max_pages_per_request))
+    batch_size = 1 if card.table_id in _RECOGNIZED_VALUE_TABLES else max(1, int(max_pages_per_request))
     failed_pages, page_errors = [], []
     raw_by_id: dict[tuple[str, str], Mapping[str, object]] = {}
     model_calls = 0
     selected_ids = {_clean(metric.get("metric_id")) for metric in selected_metrics}
+    selected_meta = {
+        _clean(metric.get("metric_id")): metric for metric in selected_metrics
+    }
     for start in range(0, len(images), batch_size):
         image_batch = images[start:start + batch_size]
         data_pages = [page for page, _ in image_batch]
@@ -1348,16 +1441,20 @@ def _extract_card_records(
                 post_func=post_func,
             )
             items = response.get('metrics')
-            if card.table_id in {'ACTUAL_CAPITAL', 'RECOGNIZED_ASSETS', 'MINIMUM_CAPITAL', 'OPERATING_METRICS'} and (
+            if card.table_id in {'ACTUAL_CAPITAL', 'RECOGNIZED_ASSETS', 'RECOGNIZED_LIABILITIES', 'MINIMUM_CAPITAL', 'OPERATING_METRICS'} and (
                 not isinstance(items, list) or any(not isinstance(item, Mapping) for item in items)
             ):
                 raise RuntimeError(f'{card.table_name}提取响应缺少有效的metrics列表，不能判为未披露。')
         except (requests.RequestException, RuntimeError) as exc:
-            if card.table_id not in {'RECOGNIZED_ASSETS', 'ACTUAL_CAPITAL'}:
+            if card.table_id not in {'RECOGNIZED_ASSETS', 'RECOGNIZED_LIABILITIES', 'ACTUAL_CAPITAL'}:
                 raise
             failed_pages.extend(data_pages)
             page_errors.append(exc)
             continue
+        response_unit_context = model_unit_context(
+            response,
+            data_pages + ([context_page] if context_page else []),
+        )
         for item in response.get("metrics", []):
             if not isinstance(item, Mapping):
                 continue
@@ -1379,7 +1476,24 @@ def _extract_card_records(
                     # Historical columns are never valid substitutes for the
                     # requested current/cumulative operating periods.
                     continue
-            if card.table_id == 'RECOGNIZED_ASSETS':
+            if card.table_id == 'THREE_YEAR_INVESTMENT_RETURN':
+                item = _repair_three_year_evidence(item, metric_id)
+            expected_unit = canonical_unit(
+                selected_meta.get(metric_id, {}).get('expected_unit')
+            )
+            if (
+                card.table_id in {'SOLVENCY_MAIN', 'ACTUAL_CAPITAL', 'MINIMUM_CAPITAL'}
+                and expected_unit in _AMOUNT_UNIT_FACTORS
+            ):
+                # Bind the row to the table-unit quote returned from the same
+                # visible request. This lets verified integer source precision
+                # coexist with a more precise disclosure in another table.
+                item = apply_unit_context(
+                    item,
+                    response_unit_context,
+                    require_explicit=False,
+                )
+            if card.table_id in _RECOGNIZED_VALUE_TABLES:
                 # Context pages may not contribute duplicate source values.
                 try:
                     item_page = int(item.get('page', 0))
@@ -1391,7 +1505,11 @@ def _extract_card_records(
                 # dataset; validation retry can request the target again.
                 if recognized_column_error(item.get('column_header_path')):
                     continue
-                context = asset_units.get(item_page) or model_unit_context(response, data_pages + ([context_page] if context_page else []))
+                context = (
+                    asset_units.get(item_page)
+                    if card.table_id == 'RECOGNIZED_ASSETS'
+                    else None
+                ) or response_unit_context
                 # A model-supplied row unit without literal amount, row label,
                 # or table-header evidence cannot be trusted as a source scale.
                 # Clearing it makes NUMBER validation block Step 3 and trigger
@@ -1430,6 +1548,19 @@ def _extract_card_records(
             recovered = recover_surrender_rate(pdf_bytes, pages)
             if recovered is not None:
                 raw_by_id[surrender_key] = recovered
+
+    if card.table_id == 'SOLVENCY_MAIN':
+        missing_codes = {
+            metric_id for metric_id in selected_ids & {
+                'MINIMUM_CAPITAL', 'CORE_SOLVENCY_RATIO', 'COMBINED_SOLVENCY_RATIO',
+            }
+            if _normalized_model_status(raw_by_id.get((metric_id, ''), {}), metric_id) == 'not_disclosed'
+        }
+        if missing_codes:
+            for metric_id, recovered in recover_solvency_main_metrics(
+                pdf_bytes, pages, missing_codes,
+            ).items():
+                raw_by_id[(metric_id, '')] = recovered
 
     records: list[dict[str, object]] = []
     for metric in selected_metrics:
@@ -1624,7 +1755,7 @@ def _source_semantic_checks(records):
     checks = []
     for _, row in records.iterrows():
         code = _clean(row['指标编码'])
-        if row['目标表ID'] == 'RECOGNIZED_ASSETS' and row['状态'] in {'found', 'disclosed_zero', 'disclosed_na'}:
+        if row['目标表ID'] in _RECOGNIZED_VALUE_TABLES and row['状态'] in {'found', 'disclosed_zero', 'disclosed_na'}:
             reason = recognized_column_error(row.get('列表头路径'))
             checks.append(_validation_row(
                 f"{row['目标表ID']}:{code}:SOURCE_SEMANTICS", row['目标表ID'], code,

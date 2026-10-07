@@ -11,6 +11,7 @@ from services.table_strategy_handlers import (
     PostprocessRequest,
     PromptRequest,
     RECOGNIZED_ASSETS_V2_POSTPROCESS_HANDLER,
+    RECOGNIZED_LIABILITIES_POSTPROCESS_HANDLER,
     _simplify_recognized_assets_columns,
 )
 from services.table_strategy_registry import (
@@ -20,6 +21,7 @@ from services.table_strategy_registry import (
     STRATEGY_OPERATING_METRICS,
     STRATEGY_RECOGNIZED_ASSETS,
     STRATEGY_RECOGNIZED_ASSETS_V2,
+    STRATEGY_RECOGNIZED_LIABILITIES,
     STRATEGY_SOLVENCY_MAIN,
     STRATEGY_THREE_YEAR_RETURN,
     StrategyRegistryError,
@@ -37,9 +39,10 @@ class TableStrategyRegistryTests(unittest.TestCase):
             "THREE_YEAR_INVESTMENT_RETURN": STRATEGY_THREE_YEAR_RETURN,
             "MINIMUM_CAPITAL": STRATEGY_MINIMUM_CAPITAL,
             "RECOGNIZED_ASSETS": STRATEGY_RECOGNIZED_ASSETS_V2,
+            "RECOGNIZED_LIABILITIES": STRATEGY_RECOGNIZED_LIABILITIES,
         }
 
-        self.assertGreaterEqual(len(registered_table_strategies()), 8)
+        self.assertGreaterEqual(len(registered_table_strategies()), 9)
         for table_id, strategy_id in expected.items():
             with self.subTest(table_id=table_id):
                 strategy = resolve_table_strategy(table_id)
@@ -104,6 +107,25 @@ class TableStrategyRegistryTests(unittest.TestCase):
         ])
         self.assertTrue(any("化简" in note for note in notes))
         self.assertTrue(any("认可资产合计" in note for note in notes))
+
+    def test_recognized_liabilities_postprocess_keeps_recognized_value_only(self):
+        rows = [
+            ["行次", "项目", "期末数", "", "", "期初数", "", ""],
+            ["", "", "账面价值", "非认可价值", "认可价值", "账面价值", "非认可价值", "认可价值"],
+            ["1", "准备金负债", "100", "20", "80", "90", "18", "72"],
+            ["8", "合计", "", "", "800", "", "", "720"],
+        ]
+        result, notes = RECOGNIZED_LIABILITIES_POSTPROCESS_HANDLER(
+            PostprocessRequest(table_id="RECOGNIZED_LIABILITIES", rows=rows)
+        )
+
+        self.assertEqual(result, [
+            ["行次", "项目", "期末数", "期初数"],
+            ["1", "准备金负债", "80", "72"],
+            ["8", "认可负债合计", "800", "720"],
+        ])
+        self.assertTrue(any("仅保留认可价值列" in note for note in notes))
+        self.assertTrue(any("认可负债合计" in note for note in notes))
 
     def test_unregistered_table_uses_generic_strategy(self):
         strategy = resolve_table_strategy("NEW_SIMPLE_TABLE")

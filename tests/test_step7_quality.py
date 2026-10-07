@@ -18,6 +18,7 @@ from services.solvency_step7_quality import (
     period_scopes,
     radar_figure,
     radar_values,
+    ratio_bar_figure,
     value_for,
 )
 from services.solvency_step7_quality_charts import company_quality_chart
@@ -196,18 +197,19 @@ class Step7QualityTests(unittest.TestCase):
 
     def test_value_rate_uses_matching_period_scope_and_missing_is_not_zero(self):
         frame = pd.DataFrame([
-            row("NEW_BUSINESS_VALUE", 20), row("SIGNED_PREMIUM", 100),
+            row("NEW_BUSINESS_VALUE", 20), row("SIGNED_PREMIUM", 100), row("RENEWAL_PREMIUM", 60),
             row("NEW_BUSINESS_VALUE", 50, scope="本年累计数"),
             row("SIGNED_PREMIUM", 200, scope="本年累计数"),
+            row("RENEWAL_PREMIUM", 150, scope="本年累计数"),
             row("NEW_BUSINESS_VALUE", 40, period="2026Q1"),
         ])
-        axes = period_scopes(frame, ("NEW_BUSINESS_VALUE", "SIGNED_PREMIUM"), ["2026Q1", "2026Q2"])
+        axes = period_scopes(frame, ("NEW_BUSINESS_VALUE", "SIGNED_PREMIUM", "RENEWAL_PREMIUM"), ["2026Q1", "2026Q2"])
         figure, missing, invalid = combo_figure(
             frame, ["2026Q1", "2026Q2"], "NEW_BUSINESS_VALUE", "SIGNED_PREMIUM",
             derived_rate=True, axes=axes,
         )
-        self.assertEqual(list(figure.data[1].y), [None, None, 20.0, 25.0])
-        self.assertEqual(len(missing), 3)
+        self.assertEqual(list(figure.data[1].y), [None, None, 50.0, 100.0])
+        self.assertEqual(len(missing), 5)
         self.assertEqual(invalid, [])
 
     def test_radar_uses_separate_three_year_codes(self):
@@ -325,13 +327,34 @@ class Step7QualityTests(unittest.TestCase):
         self.assertTrue(missing)
 
     def test_disclosed_zero_and_absence_and_zero_denominator_are_distinct(self):
-        frame = pd.DataFrame([row("NEW_BUSINESS_VALUE", 0), row("SIGNED_PREMIUM", 0)])
+        frame = pd.DataFrame([
+            row("NEW_BUSINESS_VALUE", 0), row("SIGNED_PREMIUM", 0), row("RENEWAL_PREMIUM", 0),
+        ])
         fig, missing, invalid = combo_figure(frame, ["2026Q2"], "NEW_BUSINESS_VALUE", "SIGNED_PREMIUM", derived_rate=True)
         self.assertEqual(list(fig.data[0].y), [0])
         self.assertEqual(list(fig.data[1].y), [None])
         self.assertTrue(has_values(fig))
         self.assertFalse(missing)
         self.assertIn("无法计算", invalid[0])
+
+    def test_operating_ratio_bars_use_quarter_axis_and_formula_fallback(self):
+        frame = pd.DataFrame([
+            row("INSURANCE_CONTRACT_LIABILITY", 800),
+            row("TOTAL_ASSETS", 1000),
+            row("NET_ASSETS", 100),
+            row("INSURANCE_REVENUE", 75),
+            row("SIGNED_PREMIUM", 100),
+        ])
+        liabilities, missing, invalid = ratio_bar_figure(
+            frame, ["2026Q2"], "INSURANCE_CONTRACT_LIABILITY_TO_TOTAL_LIABILITIES"
+        )
+        revenue, revenue_missing, revenue_invalid = ratio_bar_figure(
+            frame, ["2026Q2"], "INSURANCE_REVENUE_TO_SIGNED_PREMIUM"
+        )
+        self.assertAlmostEqual(liabilities.data[0].y[0], 800 / 900 * 100)
+        self.assertAlmostEqual(revenue.data[0].y[0], 75.0)
+        self.assertEqual(list(liabilities.data[0].x), ["2026Q2"])
+        self.assertFalse(missing or invalid or revenue_missing or revenue_invalid)
 
     def test_negative_pie_is_suppressed_and_signed_stack_is_kept(self):
         frame = pd.DataFrame([
@@ -385,7 +408,7 @@ class Step7QualityTests(unittest.TestCase):
         self.assertEqual(missing, [])
         self.assertEqual(invalid, [])
 
-    def test_business_combo_bar_labels_are_white_and_inside_bars(self):
+    def test_business_combo_bar_labels_are_black_and_inside_bars(self):
         cases = (
             ("SIGNED_PREMIUM", "NEW_BUSINESS_MARGIN", False),
             ("NEW_BUSINESS_VALUE", "SIGNED_PREMIUM", True),
@@ -405,7 +428,7 @@ class Step7QualityTests(unittest.TestCase):
                     figure, "甲公司", 7, unit="十亿元",
                 ).to_dict(validate=True)
                 bar_labels = spec["layer"][0]["layer"][1]
-                self.assertEqual(bar_labels["mark"]["color"], "#FFFFFF")
+                self.assertEqual(bar_labels["mark"]["color"], "#000000")
                 dataset = spec["datasets"][spec["data"]["name"]]
                 self.assertEqual(dataset[0]["柱标签位置"], dataset[0]["柱值"] / 2)
 
@@ -441,13 +464,48 @@ for index, (name, plan) in enumerate(SPECIAL_CHART_PLANS.items()):
         at = AppTest.from_string(source).run(timeout=30)
         self.assertFalse(at.exception)
         legends = [item.value for item in at.markdown if "未披露：未披露公司" in item.value or "未披露公司（未披露）" in item.value]
-        self.assertEqual(len(legends), 7)
-        self.assertEqual(len([item for item in at.caption if item.value.startswith("注：未披露——")]), 8)
+        self.assertEqual(len(legends), 9)
+        self.assertEqual(len([item for item in at.caption if item.value.startswith("注：未披露——")]), 10)
         self.assertEqual(len(at.get("plotly_chart")), 0)
         captions = [item.value for item in at.caption]
         self.assertTrue(any("6 核心一级资本" in value for value in captions))
         self.assertFalse(any("终点采用披露的核心一级资本" in value for value in captions))
         self.assertFalse(any("上述公司有全部或部分指标未披露" in value for value in captions))
+
+    def test_business_quality_charts_fix_scope_to_quarter_without_selector(self):
+        from streamlit.testing.v1 import AppTest
+        source = '''
+import pandas as pd
+from step7_solvency import _render_quality_and_capital
+rows = []
+values = {
+    "SIGNED_PREMIUM": (100, 240),
+    "NEW_BUSINESS_MARGIN": (5, 6),
+    "NEW_BUSINESS_VALUE": (20, 50),
+    "RENEWAL_PREMIUM": (60, 140),
+    "SURRENDER_RATE": (3, 4),
+}
+for code, (quarter, cumulative) in values.items():
+    for scope, value in (("本季度数", quarter), ("本年累计数", cumulative)):
+        rows.append({"公司":"甲公司", "报告期":"2026Q2", "期间口径":scope,
+                     "指标编码":code, "指标名称":code, "数值":value,
+                     "单位":"%" if code in {"NEW_BUSINESS_MARGIN", "SURRENDER_RATE"} else "万元",
+                     "披露状态":"已披露"})
+data = pd.DataFrame(rows)
+for index, chart in enumerate((
+    "签单保费与新业务利润率",
+    "新业务价值与新业务价值率",
+    "综合退保率",
+)):
+    _render_quality_and_capital(data, chart, periods=["2026Q2"],
+        unit_mode="亿元", highlight_company="无", key_prefix=f"fixed_{index}",
+        selected_companies=["甲公司"])
+'''
+        at = AppTest.from_string(source).run(timeout=30)
+        self.assertFalse(at.exception)
+        self.assertEqual(len(at.selectbox), 0)
+        captions = [item.value for item in at.caption]
+        self.assertTrue(any("期间口径：当季" in item for item in captions))
 
     def test_render_old_external_capital_package_does_not_label_zeros_undisclosed(self):
         from streamlit.testing.v1 import AppTest

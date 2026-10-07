@@ -52,6 +52,10 @@ NARROW_TABLE_COLUMNS = [
 
 LIFE_COMPANY_TYPES = ("寿险", "健康险", "养老险")
 NON_LIFE_COMPANY_TYPES = ("财险",)
+CURRENT_QUARTER_BALANCE_METRIC_CODES = frozenset({
+    "TOTAL_ASSETS",
+    "INSURANCE_CONTRACT_LIABILITY",
+})
 
 _COMPANY_TYPE_ALIASES = {
     "寿险": "寿险",
@@ -184,6 +188,37 @@ TABLE_ALLOWED_CODES = {
         "LAND_USE_RIGHTS",
         "SEPARATE_ACCOUNT_ASSETS",
         "OTHER_RECOGNIZED_ASSETS",
+    },
+    "RECOGNIZED_LIABILITIES": {
+        "RECOGNIZED_LIABILITIES",
+        "RESERVE_LIABILITIES",
+        "UNEARNED_PREMIUM_RESERVE",
+        "LIFE_UNEARNED_PREMIUM_RESERVE",
+        "NON_LIFE_UNEARNED_PREMIUM_RESERVE",
+        "OUTSTANDING_CLAIMS_RESERVE",
+        "IBNR_RESERVE",
+        "FINANCIAL_LIABILITIES",
+        "SECURITIES_SOLD_UNDER_REPURCHASE",
+        "POLICYHOLDER_DEPOSITS_INVESTMENTS",
+        "DERIVATIVE_FINANCIAL_LIABILITIES",
+        "OTHER_FINANCIAL_LIABILITIES",
+        "PAYABLES_AND_ADVANCES",
+        "POLICY_DIVIDENDS_PAYABLE",
+        "CLAIMS_PAYABLE",
+        "PREMIUMS_RECEIVED_IN_ADVANCE",
+        "REINSURANCE_PAYABLES",
+        "COMMISSIONS_PAYABLE",
+        "EMPLOYEE_BENEFITS_PAYABLE",
+        "TAXES_PAYABLE",
+        "REINSURANCE_DEPOSITS_RECEIVED",
+        "OTHER_PAYABLES_AND_ADVANCES",
+        "PROVISIONS",
+        "SEPARATE_ACCOUNT_LIABILITY",
+        "CAPITAL_LIABILITIES",
+        "OTHER_RECOGNIZED_LIABILITIES",
+        "DEFERRED_TAX_LIABILITIES",
+        "CASH_VALUE_GUARANTEE",
+        "INCOME_TAX_RESERVE",
     },
 }
 
@@ -537,7 +572,10 @@ def _normalize_canonical_table(table, taxonomy, metadata, identity, peer_group, 
         period = str(raw.get('期间口径') or '本季度末数')
         if str(raw.get('指标语义键', '')).endswith(':THREE_YEAR_AVERAGE'):
             period = '近三年平均'
-        elif table.table_id == 'OPERATING_METRICS' and any(
+        elif (
+            code in CURRENT_QUARTER_BALANCE_METRIC_CODES
+            or table.table_id == 'OPERATING_METRICS'
+        ) and any(
             term in period for term in ('本季度数', '本季度（末）数', '本季度(末)数', '当季数')
         ) and '累计' not in period:
             period = '本季度数'
@@ -722,11 +760,11 @@ def normalize_tables(
                 continue
             value_start = label_index + 1
             for column_index in range(value_start, max_width):
-                if table.table_id == "RECOGNIZED_ASSETS" and (
+                if table.table_id in {"RECOGNIZED_ASSETS", "RECOGNIZED_LIABILITIES"} and (
                     _recognized_assets_subcolumn(headers[column_index])
                     in ("账面价值", "非认可价值")
                 ):
-                    # 认可资产表主要指标仅取“认可价值”口径，账面价值与非认可价值列仅用于核对。
+                    # S03/S04主要指标仅取“认可价值”口径，其他价值列仅用于核对。
                     continue
                 raw_value = row[column_index]
                 numeric_value = parse_numeric(raw_value)

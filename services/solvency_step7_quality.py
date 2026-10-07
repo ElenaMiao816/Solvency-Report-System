@@ -50,12 +50,18 @@ RADAR_METRICS = (
 )
 METRIC_LABELS = {
     "SIGNED_PREMIUM": "签单保费", "NEW_BUSINESS_VALUE": "新业务价值",
+    "RENEWAL_PREMIUM": "续期签单保费", "INSURANCE_REVENUE": "保险业务收入",
+    "INSURANCE_CONTRACT_LIABILITY_TO_TOTAL_LIABILITIES": "保险合同负债/总负债",
+    "INSURANCE_REVENUE_TO_SIGNED_PREMIUM": "保险业务收入/签单保费",
     "NEW_BUSINESS_MARGIN": "新业务利润率", "INVESTMENT_RETURN": "投资收益率",
     "COMPREHENSIVE_INVESTMENT_RETURN": "综合投资收益率",
 }
 SCOPE_LABELS = {"quarter": "当季", "point": "本季度末数", "cumulative": "累计", "three_year": "近三年平均"}
 BUSINESS_QUARTER_CODES = frozenset({
     "SURRENDER_RATE", "SIGNED_PREMIUM", "NEW_BUSINESS_MARGIN", "NEW_BUSINESS_VALUE",
+    "RENEWAL_PREMIUM", "INSURANCE_REVENUE", "INSURANCE_CONTRACT_LIABILITY",
+    "TOTAL_ASSETS", "NET_ASSETS", "INSURANCE_CONTRACT_LIABILITY_TO_TOTAL_LIABILITIES",
+    "INSURANCE_REVENUE_TO_SIGNED_PREMIUM", "NEW_BUSINESS_VALUE_RATE",
 })
 BUSINESS_QUARTER_RATIO_CODES = frozenset({"SURRENDER_RATE", "NEW_BUSINESS_MARGIN"})
 CORE_FULL_LABELS = (
@@ -257,7 +263,8 @@ def combo_figure(
 ) -> tuple[go.Figure, list[str], list[str]]:
     """Amount/rate combo with matched period and period-scope values."""
     if axes is None:
-        axes = [(str(p), scope) for p in periods] if scope else period_scopes(frame, (bar_code, line_code), periods)
+        axis_codes = (bar_code, line_code, "RENEWAL_PREMIUM") if derived_rate else (bar_code, line_code)
+        axes = [(str(p), scope) for p in periods] if scope else period_scopes(frame, axis_codes, periods)
     labels, bars, lines, missing, invalid = [], [], [], [], []
     for period, kind in axes:
         label = f"{period}·{SCOPE_LABELS[kind]}"
@@ -272,12 +279,16 @@ def combo_figure(
         amount = scoped_value(bar_code)
         if derived_rate:
             premium = scoped_value("SIGNED_PREMIUM")
-            if amount is not None and premium is not None and premium != 0:
-                rate = amount / premium * 100
+            renewal = scoped_value("RENEWAL_PREMIUM")
+            new_business_premium = (
+                None if premium is None or renewal is None else premium - renewal
+            )
+            if amount is not None and new_business_premium is not None and new_business_premium != 0:
+                rate = amount / new_business_premium * 100
             else:
                 rate = None
-                if premium == 0:
-                    invalid.append(f"{label}：签单保费为 0，新业务价值率无法计算")
+                if new_business_premium == 0:
+                    invalid.append(f"{label}：签单保费－续期签单保费为 0，新业务价值率无法计算")
         else:
             rate = scoped_value(line_code)
         bars.append(amount)
@@ -286,6 +297,8 @@ def combo_figure(
             missing.append(f"{label}：{METRIC_LABELS[bar_code]}")
         if derived_rate and premium is None:
             missing.append(f"{label}：签单保费（无法计算新业务价值率）")
+        if derived_rate and renewal is None:
+            missing.append(f"{label}：续期签单保费（无法计算新业务价值率）")
         elif not derived_rate and rate is None:
             missing.append(f"{label}：{METRIC_LABELS[line_code]}")
     fig = make_subplots(specs=[[{"secondary_y": True}]])
@@ -297,6 +310,50 @@ def combo_figure(
                      automargin=True, categoryorder="array", categoryarray=labels)
     fig.update_yaxes(title_text="金额" if bar_code in {"SIGNED_PREMIUM", "NEW_BUSINESS_VALUE"} else "%", secondary_y=False, showgrid=True, gridcolor="#E7ECF5")
     fig.update_yaxes(title_text="%", secondary_y=True, showgrid=False)
+    return fig, missing, invalid
+
+
+def ratio_bar_figure(
+    frame: pd.DataFrame,
+    periods: list[str],
+    metric_code: str,
+) -> tuple[go.Figure, list[str], list[str]]:
+    """Quarterly company-panel bar chart for the two operating ratios."""
+    values: list[float | None] = []
+    missing: list[str] = []
+    invalid: list[str] = []
+    for period in periods:
+        value = operating_quarter_value(frame, metric_code, period)
+        if value is None and metric_code == "INSURANCE_CONTRACT_LIABILITY_TO_TOTAL_LIABILITIES":
+            liability = operating_quarter_value(frame, "INSURANCE_CONTRACT_LIABILITY", period)
+            assets = operating_quarter_value(frame, "TOTAL_ASSETS", period)
+            equity = operating_quarter_value(frame, "NET_ASSETS", period)
+            denominator = None if assets is None or equity is None else assets - equity
+            if liability is not None and denominator not in {None, 0}:
+                value = liability / denominator * 100.0
+            elif denominator == 0:
+                invalid.append(f"{period}：总负债（总资产－净资产）为 0，比例无法计算")
+        elif value is None and metric_code == "INSURANCE_REVENUE_TO_SIGNED_PREMIUM":
+            revenue = operating_quarter_value(frame, "INSURANCE_REVENUE", period)
+            premium = operating_quarter_value(frame, "SIGNED_PREMIUM", period)
+            if revenue is not None and premium not in {None, 0}:
+                value = revenue / premium * 100.0
+            elif premium == 0:
+                invalid.append(f"{period}：签单保费为 0，比例无法计算")
+        values.append(value)
+        if value is None:
+            missing.append(f"{period}：{METRIC_LABELS[metric_code]}")
+
+    fig = _base_figure()
+    fig.add_trace(go.Bar(
+        x=periods, y=values, marker_color=BLUE, name=METRIC_LABELS[metric_code],
+        hovertemplate="%{x}<br>%{y:,.2f}%<extra>%{fullData.name}</extra>",
+    ))
+    fig.update_xaxes(
+        tickangle=0, tickmode="array", tickvals=periods, ticktext=periods,
+        automargin=True, categoryorder="array", categoryarray=periods,
+    )
+    fig.update_yaxes(title_text="%", ticksuffix="%", showgrid=True, gridcolor="#E7ECF5")
     return fig, missing, invalid
 
 

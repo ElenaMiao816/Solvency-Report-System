@@ -51,10 +51,74 @@ def company_quality_chart(fig, company: str, company_count: int, *, unit: str,
         return _radar(fig, company, company_count)
     if kind == "waterfall":
         return _waterfall(fig, company, company_count, unit)
+    if kind == "bar" and len(fig.data) == 1:
+        return _bar(
+            fig, company, company_count, "%" if percentage_bar else unit,
+            color_by_period=color_by_period,
+            label_color="#000000" if percentage_bar else "#FFFFFF",
+        )
     if len(fig.data) == 2 and fig.data[1].type == "scatter":
         return _combo(fig, company, company_count, "%" if percentage_bar else unit,
                       color_by_period=color_by_period)
     return _stack(fig, company, company_count, unit)
+
+
+def _bar(
+    fig,
+    company,
+    count,
+    unit,
+    *,
+    color_by_period=False,
+    label_color="#FFFFFF",
+):
+    trace = fig.data[0]
+    periods = list(fig.layout.xaxis.ticktext or trace.x)
+    rows = pd.DataFrame([
+        {
+            "公司": company,
+            "报告期": period,
+            "指标名称": trace.name,
+            "数值": value,
+            "单位": unit,
+            "标签位置": None if value is None else value / 2,
+            "标签": "" if value is None else (
+                f"{value:.1f}%" if unit == "%" else _whole_number_label(value)
+            ),
+        }
+        for period, value in zip(periods, trace.y)
+    ])
+    x, scale = _period_x(periods, count), _scale(fig.layout.yaxis)
+    _, font, _ = _panel_typography(count)
+    base = alt.Chart(rows)
+    bars = base.mark_bar(
+        width=_responsive_bar_width(count), opacity=0.9,
+        cornerRadiusTopLeft=2, cornerRadiusTopRight=2, color=trace.marker.color,
+    ).encode(
+        x=x,
+        y=alt.Y("数值:Q", title=None, axis=_hidden_value_axis(), scale=scale),
+        tooltip=["公司:N", "报告期:N", "指标名称:N",
+                 alt.Tooltip("数值:Q", title=f"数值（{unit}）", format=",.2f")],
+    )
+    if color_by_period:
+        period_colors = report_period_combo_bar_color_map(periods)
+        bars = bars.encode(color=alt.Color(
+            "报告期:N",
+            scale=alt.Scale(
+                domain=periods,
+                range=[period_colors[period] for period in periods],
+            ),
+            legend=None,
+        ))
+    labels = base.mark_text(
+        tooltip=False, fontSize=font, fontWeight="bold", color=label_color,
+    ).encode(
+        x=x, y=alt.Y("标签位置:Q", scale=scale), text="标签:N",
+    )
+    zero = alt.Chart(pd.DataFrame({"零线": [0]})).mark_rule(
+        color="#0C233C", strokeWidth=1,
+    ).encode(y=alt.Y("零线:Q", scale=scale))
+    return _transparent(alt.layer(bars, labels, zero).properties(height=COMPANY_PANEL_HEIGHT))
 
 
 def _combo(fig, company, count, unit, *, color_by_period=False):
@@ -102,7 +166,7 @@ def _combo(fig, company, count, unit, *, color_by_period=False):
         ))
     bar_labels = base.mark_text(tooltip=False, dy=alt.ExprRef(expr="datum['柱标签偏移']"),
                                 fontSize=font, fontWeight="bold",
-                                color="#FFFFFF" if business_amount_bar else "#000000").encode(
+                                color="#000000").encode(
         x=x, y=alt.Y("柱标签位置:Q", scale=amount_scale), text="柱标签:N")
     # Each run of disclosed values is a separate path, even on older Vega-Lite.
     line_chart = base.mark_line(color="#FD349C", strokeWidth=2.6).encode(

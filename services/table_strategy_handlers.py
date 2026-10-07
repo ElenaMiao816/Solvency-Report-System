@@ -817,6 +817,28 @@ def _normalize_recognized_assets_total_alias(
     return normalized, changed
 
 
+def _normalize_recognized_liabilities_total_alias(
+    rows: list[list[str]],
+) -> tuple[list[list[str]], bool]:
+    """Standardize the recognized-liabilities tail total label."""
+    normalized = [list(row) for row in rows]
+    changed = False
+    for cells in normalized:
+        if not cells:
+            continue
+        has_row_number = bool(
+            re.fullmatch(r"\d+(?:\.\d+)*\*?", str(cells[0]).strip())
+        )
+        label_index = 1 if has_row_number and len(cells) >= 2 else 0
+        if label_index >= len(cells):
+            continue
+        label = str(cells[label_index]).strip()
+        if re.sub(r"[\s（）()]", "", label) == "合计":
+            cells[label_index] = "认可负债合计"
+            changed = True
+    return normalized, changed
+
+
 def _simplify_recognized_assets_columns(
     rows: list[list[str]],
 ) -> tuple[list[list[str]], bool]:
@@ -907,6 +929,13 @@ def _simplify_recognized_assets_columns(
     return simplified, True
 
 
+def _simplify_recognized_liabilities_columns(
+    rows: list[list[str]],
+) -> tuple[list[list[str]], bool]:
+    """Keep only recognized-value period columns in the S04 liability table."""
+    return _simplify_recognized_assets_columns(rows)
+
+
 def make_postprocess_handler(
     *,
     normalize_three_year: bool = False,
@@ -914,6 +943,8 @@ def make_postprocess_handler(
     normalize_actual_capital_total: bool = False,
     normalize_recognized_assets_total: bool = False,
     simplify_recognized_assets_columns: bool = False,
+    normalize_recognized_liabilities_total: bool = False,
+    simplify_recognized_liabilities_columns: bool = False,
 ) -> PostprocessHandler:
     def postprocess(
         request: PostprocessRequest,
@@ -926,6 +957,8 @@ def make_postprocess_handler(
                 ("normalize_actual_capital_total", normalize_actual_capital_total),
                 ("simplify_recognized_assets_columns", simplify_recognized_assets_columns),
                 ("normalize_recognized_assets_total", normalize_recognized_assets_total),
+                ("simplify_recognized_liabilities_columns", simplify_recognized_liabilities_columns),
+                ("normalize_recognized_liabilities_total", normalize_recognized_liabilities_total),
                 ("trim_adjacent_rows", request.trim_adjacent is not None),
             )
             if enabled
@@ -969,6 +1002,18 @@ def make_postprocess_handler(
             if changed:
                 notes.append(
                     "已将认可资产表末行‘合计’标准化为‘认可资产合计’"
+                )
+        if "simplify_recognized_liabilities_columns" in actions:
+            rows, changed = _simplify_recognized_liabilities_columns(rows)
+            if changed:
+                notes.append(
+                    "已将认可负债表两级表头化简为单级表头（行次/项目/期末数/期初数），仅保留认可价值列"
+                )
+        if "normalize_recognized_liabilities_total" in actions:
+            rows, changed = _normalize_recognized_liabilities_total_alias(rows)
+            if changed:
+                notes.append(
+                    "已将认可负债表末行‘合计’标准化为‘认可负债合计’"
                 )
         if "trim_adjacent_rows" in actions and request.trim_adjacent:
             rows, note = request.trim_adjacent(request.table_id, rows)
@@ -1373,5 +1418,30 @@ RECOGNIZED_ASSETS_V2_POSTPROCESS_HANDLER = make_postprocess_handler(
     normalize_recognized_assets_total=True,
 )
 RECOGNIZED_ASSETS_V2_COMPLETENESS_HANDLER = make_completeness_handler(
+    source_item_recall_ratio=1.0,
+)
+
+RECOGNIZED_LIABILITIES_PROMPT_HANDLER = make_prompt_handler(
+    full_table_note=(
+        "“S04-认可负债表”原为两级表头（期末数/期初数 × 账面价值/非认可价值/认可价值）。"
+        "提取时只保留‘认可价值’口径，输出单级表头‘行次/项目/期末数/期初数’，"
+        "其中期末数、期初数分别取对应期间的认可价值，不得输出账面价值或非认可价值列。"
+        "按原报告行顺序从准备金负债、金融负债、应付及预收款项等明细连续提取到"
+        "末行‘认可负债合计’；原文仅写‘合计’时也必须保留并标准化。"
+        "随后开始的‘S05-最低资本表’不得混入。"
+    ),
+    single_page_note=(
+        "本页属于‘S04-认可负债表’或其续页。原两级表头仅保留期末数/期初数下的"
+        "‘认可价值’列，输出单级表头‘行次/项目/期末数/期初数’。"
+        "逐行保留负债明细至‘认可负债合计’（或‘合计’），续页未重复表头时也不得删行；"
+        "遇到最低资本表立即停止。"
+    ),
+)
+RECOGNIZED_LIABILITIES_BOUNDARY_HANDLER = make_boundary_handler()
+RECOGNIZED_LIABILITIES_POSTPROCESS_HANDLER = make_postprocess_handler(
+    simplify_recognized_liabilities_columns=True,
+    normalize_recognized_liabilities_total=True,
+)
+RECOGNIZED_LIABILITIES_COMPLETENESS_HANDLER = make_completeness_handler(
     source_item_recall_ratio=1.0,
 )

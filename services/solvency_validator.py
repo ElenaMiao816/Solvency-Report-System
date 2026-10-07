@@ -7,7 +7,8 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-from .solvency_metric_registry import extend_taxonomy
+from .solvency_dataset_adapter import calculate_derived_values
+from .solvency_metric_registry import DERIVED_METRICS, extend_taxonomy
 from .solvency_normalizer import STANDARD_COLUMNS
 
 
@@ -70,6 +71,16 @@ REQUIRED_CORE_METRICS: tuple[str, ...] = (
     "CORE_SOLVENCY_RATIO",
     "COMBINED_SOLVENCY_RATIO",
 )
+
+OPERATING_DERIVED_FORMULAS = {
+    definition.code: definition
+    for definition in DERIVED_METRICS
+    if definition.code in {
+        "INSURANCE_CONTRACT_LIABILITY_TO_TOTAL_LIABILITIES",
+        "INSURANCE_REVENUE_TO_SIGNED_PREMIUM",
+        "NEW_BUSINESS_VALUE_RATE",
+    }
+}
 
 
 RULE_METRICS: dict[str, tuple[str, ...]] = {
@@ -610,6 +621,60 @@ def _business_checks(group: pd.DataFrame, rules: pd.DataFrame) -> list[Validatio
     return results
 
 
+def _operating_derived_formula_checks(group: pd.DataFrame) -> list[ValidationResult]:
+    """Validate the three operating ratios when their inputs are disclosed.
+
+    Optional disclosures stay optional: no check is emitted when formula inputs
+    are incomplete. Once all inputs are present, however, Step4 verifies that the
+    Step3 derived row exists and agrees with the shared calculation engine.
+    """
+    results: list[ValidationResult] = []
+    for code, definition in OPERATING_DERIVED_FORMULAS.items():
+        involved = (code, *definition.dependencies)
+        involved_rows = group[group["指标编码"].astype(str).isin(involved)]
+        if involved_rows.empty:
+            continue
+        period_groups = list(dict.fromkeys(
+            str(value).strip()
+            for value in involved_rows["_验证期间组"]
+            if str(value).strip()
+        ))
+        for period_group in period_groups:
+            values = {
+                dependency: _metric_value(group, dependency, period_group)
+                for dependency in definition.dependencies
+            }
+            if any(value is None for value in values.values()):
+                continue
+            expected = calculate_derived_values(values).get(code)
+            actual = _metric_value(group, code, period_group)
+            if expected is None:
+                if actual is None:
+                    continue
+                status, difference = "未通过", None
+                notes = "公式分母为0或数值无效，但标准表仍存在计算值"
+            elif actual is None:
+                status, difference = "缺失", None
+                notes = "公式依赖完整，但标准表缺少派生指标计算值"
+            else:
+                difference = float(actual - expected)
+                tolerance = max(1e-10, abs(float(expected)) * 1e-8)
+                status = "通过" if abs(difference) <= tolerance else "未通过"
+                notes = "检查通过" if status == "通过" else "标准表计算值与统一公式结果不一致"
+            tolerance = max(1e-10, abs(float(expected)) * 1e-8) if expected is not None else 0.0
+            results.append(_result(
+                check_type="公式勾稽", severity="错误",
+                rule_id=f"DERIVED_FORMULA:{code}",
+                rule_name=f"派生指标公式：{definition.name}", group=group,
+                period=period_group, actual=actual, expected=expected,
+                difference=difference, tolerance=tolerance, status=status,
+                notes=notes, involved_metrics=involved,
+                source_pages=_source_pages(group, involved, period_group),
+                suggestion="返回 Step3 重新标准化并核对公式依赖指标。" if status != "通过" else "",
+            ))
+    return results
+
+
 def validate_standard_data(
     frame: pd.DataFrame,
     rules: pd.DataFrame,
@@ -629,6 +694,7 @@ def validate_standard_data(
             results.extend(_completeness_checks(group, taxonomy_frame))
         if not rule_frame.empty:
             results.extend(_business_checks(group, rule_frame))
+        results.extend(_operating_derived_formula_checks(group))
     return pd.DataFrame([item.to_dict() for item in results], columns=RESULT_COLUMNS)
 
 

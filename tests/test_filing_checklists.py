@@ -47,9 +47,10 @@ class FilingChecklistTests(unittest.TestCase):
         self.assertEqual(Counter(e['table_id'] for e in filing_entries()), {
             'SOLVENCY_MAIN': 15, 'ACTUAL_CAPITAL': 30, 'MINIMUM_CAPITAL': 34,
             'OPERATING_METRICS': 29, 'RECOGNIZED_ASSETS': 49,
+            'RECOGNIZED_LIABILITIES': 29,
         })
-        self.assertEqual(len(filing_codes()), 147)
-        self.assertEqual(len(self.catalog), 184)
+        self.assertEqual(len(filing_codes()), 175)
+        self.assertEqual(len(self.catalog), 215)
         self.assertTrue(filing_codes() <= set(self.catalog['指标编码']))
         self.assertFalse(self.catalog['指标编码'].duplicated().any())
         source = self.catalog[self.catalog['指标编码'].isin(filing_codes())]
@@ -66,6 +67,8 @@ class FilingChecklistTests(unittest.TestCase):
         self.assertEqual(filing_row_code('ACTUAL_CAPITAL', '减：超限额应扣除的部分'), '')
         for entry in deductions:
             self.assertEqual(filing_row_code('ACTUAL_CAPITAL', entry['name'], entry['row_number']), entry['code'])
+        self.assertEqual(filing_row_code('RECOGNIZED_LIABILITIES', '准备金负债', '1'), 'RESERVE_LIABILITIES')
+        self.assertEqual(filing_row_code('RECOGNIZED_LIABILITIES', '认可负债合计', '8'), 'RECOGNIZED_LIABILITIES')
 
     def test_extraction_cards_cover_exactly_the_checklists_with_row_context(self):
         base = load_taxonomy(Path(__file__).parents[1] / 'config' / 'solvency_taxonomy.xlsx')
@@ -158,7 +161,7 @@ class FilingChecklistTests(unittest.TestCase):
     def test_downloadable_target_contains_codes_rules_and_disclosure_column(self):
         book = pd.ExcelFile(io.BytesIO(target_template_workbook_bytes(self.catalog, '偿付能力报告')))
         targets = pd.read_excel(book, sheet_name='指标清单')
-        self.assertEqual(len(targets), 184)
+        self.assertEqual(len(targets), 215)
         self.assertIn('填报规则', targets.columns)
         self.assertIn('披露状态', pd.read_excel(book, sheet_name='标准数据').columns)
 

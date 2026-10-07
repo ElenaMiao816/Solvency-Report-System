@@ -311,6 +311,34 @@ class Step4ValidatorTests(unittest.TestCase):
         row = result[result["rule_id"] == "SCHEMA_CONFLICTING_DUPLICATE"].iloc[0]
         self.assertEqual(row["status"], "未通过")
 
+    def test_operating_derived_formulas_are_checked_when_inputs_are_complete(self):
+        def operating_row(code, name, value):
+            item = standard_row("ACTUAL_CAPITAL", value, period="本季度数")
+            item.update({"指标编码": code, "指标名称": name, "单位": "倍" if "TO_" in code or code.endswith("_RATE") else "万元"})
+            return item
+
+        rows = [
+            operating_row("INSURANCE_CONTRACT_LIABILITY", "保险合同负债", 800),
+            operating_row("TOTAL_ASSETS", "总资产", 1000),
+            operating_row("NET_ASSETS", "净资产", 100),
+            operating_row("INSURANCE_CONTRACT_LIABILITY_TO_TOTAL_LIABILITIES", "保险合同负债/总负债", 800 / 900),
+            operating_row("INSURANCE_REVENUE", "保险业务收入", 75),
+            operating_row("SIGNED_PREMIUM", "签单保费", 100),
+            operating_row("INSURANCE_REVENUE_TO_SIGNED_PREMIUM", "保险业务收入/签单保费", 0.75),
+            operating_row("RENEWAL_PREMIUM", "续期签单保费", 60),
+            operating_row("NEW_BUSINESS_VALUE", "新业务价值", 10),
+            operating_row("NEW_BUSINESS_VALUE_RATE", "新业务价值率", 0.25),
+        ]
+        result = validate_standard_data(pd.DataFrame(rows), pd.DataFrame())
+        checks = result[result["rule_id"].astype(str).str.startswith("DERIVED_FORMULA:")]
+        self.assertEqual(len(checks), 3)
+        self.assertEqual(set(checks["status"]), {"通过"})
+
+        rows[-1]["数值"] = 0.10
+        failed = validate_standard_data(pd.DataFrame(rows), pd.DataFrame())
+        rate = failed[failed["rule_id"] == "DERIVED_FORMULA:NEW_BUSINESS_VALUE_RATE"].iloc[0]
+        self.assertEqual(rate["status"], "未通过")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -52,6 +52,10 @@ AUTHORITATIVE_POLICY_SURPLUS_DERIVED_CODES = {
     "POLICY_SURPLUS_CORE_TO_CORE_CAPITAL",
     "POLICY_SURPLUS_TO_INSURANCE_LIABILITIES",
 }
+DERIVED_CURRENT_QUARTER_DEPENDENCY_FALLBACKS = frozenset({
+    ("TOTAL_ASSETS_TO_REGISTERED_CAPITAL", "TOTAL_ASSETS"),
+    ("POLICY_SURPLUS_TO_INSURANCE_LIABILITIES", "INSURANCE_CONTRACT_LIABILITY"),
+})
 EXTERNAL_INVESTMENT_COLUMNS = {
     "投资收益率(累计数)": ("投资收益率", "本年累计数"),
     "综合投资收益率(累计数)": ("综合投资收益率", "本年累计数"),
@@ -63,6 +67,11 @@ EXTERNAL_INVESTMENT_COLUMNS = {
 EXTERNAL_OPERATING_QUARTER_COLUMNS = {
     "综合退保率": ("综合退保率", True),
     "签单保费": ("签单保费", False),
+    "续期签单保费": ("续期签单保费", False),
+    "保险业务收入": ("保险业务收入", False),
+    "保险合同负债": ("保险合同负债", False),
+    "总资产": ("总资产", False),
+    "净资产": ("净资产", False),
     "新业务利润率": ("新业务利润率", True),
     "新业务价值": ("新业务价值", False),
 }
@@ -178,6 +187,28 @@ def canonical_period_scope(value: Any) -> str:
     return text
 
 
+def derived_dependency_period_scopes(
+    derived_code: str,
+    dependency_code: str,
+    output_period_scope: Any,
+) -> tuple[str, ...]:
+    """Return permitted source periods for one derived-metric dependency.
+
+    Most formulas must use dependencies from exactly the same period. The two
+    balance-sheet ratios below are the narrow exception used by STEP3 reports:
+    their balance-sheet value may be labelled ``本季度数`` while the related
+    capital values are labelled ``本季度末数``.
+    """
+    canonical_scope = canonical_period_scope(output_period_scope)
+    scopes = [canonical_scope]
+    if (
+        canonical_scope == "本季度末数"
+        and (derived_code, dependency_code) in DERIVED_CURRENT_QUARTER_DEPENDENCY_FALLBACKS
+    ):
+        scopes.append("本季度数")
+    return tuple(scopes)
+
+
 def _number(value: Any) -> float | None:
     numeric = parse_numeric(value)
     if pd.isna(numeric) or not math.isfinite(float(numeric)):
@@ -193,6 +224,36 @@ def _external_undisclosed_cell(value: Any) -> bool:
     if _blank_external_cell(value):
         return True
     return str(value).strip().lower() in EXTERNAL_UNDISCLOSED_MARKERS
+
+
+def _drop_blank_excel_duplicate_columns(
+    frame: pd.DataFrame,
+    sheet_name: str,
+) -> pd.DataFrame:
+    """Ignore only the blank copies created when Excel repeats a header."""
+    blank_duplicates: list[str] = []
+    populated_duplicates: list[str] = []
+    existing = set(frame.columns)
+    for column in frame.columns:
+        match = re.fullmatch(r"(.+)\.(\d+)", str(column))
+        if match is None:
+            continue
+        original = match.group(1)
+        if original not in existing:
+            continue
+        if frame[column].map(_blank_external_cell).all():
+            blank_duplicates.append(str(column))
+        else:
+            populated_duplicates.append(original)
+    if populated_duplicates:
+        labels = "、".join(dict.fromkeys(populated_duplicates))
+        raise ValueError(
+            f"工作表 {sheet_name} 存在有数据的同名重复指标列：{labels}；"
+            "请保留一列，或将两列改为不同的标准指标名称。"
+        )
+    if not blank_duplicates:
+        return frame
+    return frame.drop(columns=blank_duplicates)
 
 
 def _infer_capital_detail_zeros(
@@ -352,6 +413,26 @@ def calculate_derived_values(values: dict[str, Any]) -> dict[str, Any]:
     result["CREDIT_RISK_TO_QUANT_CAPITAL"] = _safe_divide(get("CREDIT_RISK_CAPITAL"), quant_capital)
     result["DIVERSIFICATION_EFFECT_TO_QUANT_CAPITAL"] = _safe_divide(get("QUANT_RISK_DIVERSIFICATION_EFFECT"), quant_capital)
     result["LOSS_ABSORPTION_TO_QUANT_CAPITAL"] = _safe_divide(get("CONTRACT_LOSS_ABSORPTION_EFFECT"), quant_capital)
+    total_liabilities = None
+    total_assets = get("TOTAL_ASSETS")
+    net_assets = get("NET_ASSETS")
+    if total_assets is not None and net_assets is not None:
+        total_liabilities = total_assets - net_assets
+    result["INSURANCE_CONTRACT_LIABILITY_TO_TOTAL_LIABILITIES"] = _safe_divide(
+        get("INSURANCE_CONTRACT_LIABILITY"), total_liabilities
+    )
+    result["INSURANCE_REVENUE_TO_SIGNED_PREMIUM"] = _safe_divide(
+        get("INSURANCE_REVENUE"), get("SIGNED_PREMIUM")
+    )
+    signed_premium = get("SIGNED_PREMIUM")
+    renewal_premium = get("RENEWAL_PREMIUM")
+    new_business_premium = (
+        None if signed_premium is None or renewal_premium is None
+        else signed_premium - renewal_premium
+    )
+    result["NEW_BUSINESS_VALUE_RATE"] = _safe_divide(
+        get("NEW_BUSINESS_VALUE"), new_business_premium
+    )
     result["TOTAL_ASSETS_TO_REGISTERED_CAPITAL"] = _safe_divide(get("TOTAL_ASSETS"), get("REGISTERED_CAPITAL"))
     return result
 
@@ -522,64 +603,104 @@ def append_derived_metrics(frame: pd.DataFrame) -> pd.DataFrame:
         source["报告类型"] = ""
     source = source[~source["指标编码"].isin([item.code for item in DERIVED_METRICS])].copy()
     source["_期间组"] = source["期间口径"].map(canonical_period_scope)
-    grouping = ["报告类型", "公司统一编码", "报告年度", "报告季度", "报告期", "_期间组"]
+    entity_grouping = ["报告类型", "公司统一编码", "报告年度", "报告季度", "报告期"]
     derived_records: list[dict] = []
 
-    for _, group in source.groupby(grouping, dropna=False, sort=False):
-        values: dict[str, Any] = {}
-        for code, code_rows in group.groupby("指标编码", sort=False):
-            if str(code) in POLICY_SURPLUS_COMPONENT_CODES:
-                code_rows = code_rows.loc[
-                    ~code_rows["来源类型"].fillna("").astype(str).eq("宽表空白推定")
-                ]
-            candidates = pd.to_numeric(code_rows["数值"], errors="coerce").dropna()
-            if not candidates.empty:
-                values[str(code)] = float(candidates.iloc[0])
-        calculated = calculate_derived_values(values)
-        base = group.iloc[0]
-        source_pages = "、".join(dict.fromkeys(str(item) for item in group["来源页码"] if str(item).strip()))
-        source_sheets = "、".join(dict.fromkeys(str(item) for item in group["来源工作表"] if str(item).strip()))
-        for definition in DERIVED_METRICS:
-            value = calculated.get(definition.code)
-            if value is None or (isinstance(value, float) and not math.isfinite(value)):
-                continue
-            note = "由标准化基础指标自动计算"
-            if definition.code in POLICY_SURPLUS_RATIO_COMPONENTS:
-                components = POLICY_SURPLUS_RATIO_COMPONENTS[definition.code]
-                if any(code not in values for code in components):
-                    note = "仅汇总有披露数值的保单未来盈余层级；未披露层级未计入分子"
-            derived_records.append({
-                "公司": base.get("公司", ""),
-                "原始公司名称": base.get("原始公司名称", ""),
-                "标准公司名称": base.get("标准公司名称", ""),
-                "公司统一编码": base.get("公司统一编码", ""),
-                "公司类型": base.get("公司类型", ""),
-                "同业分类": base.get("同业分类", ""),
-                "报告类型": base.get("报告类型", ""),
-                "报告年度": base.get("报告年度", ""),
-                "报告季度": base.get("报告季度", ""),
-                "报告期": base.get("报告期", ""),
-                "披露日期": base.get("披露日期", ""),
-                "一级模块": definition.level1,
-                "二级模块": definition.level2,
-                "行次": "",
-                "指标编码": definition.code,
-                "指标名称": definition.name,
-                "期间口径": base.get("_期间组", "本季度末数"),
-                "数值": value,
-                "单位": definition.unit,
-                "数据类型": definition.data_type,
-                "是否预测": "是" if "预测" in str(base.get("_期间组", "")) else "否",
-                "来源页码": source_pages,
-                "原始披露值": "",
-                "备注": note,
-                "来源类型": "系统计算",
-                "指标属性": definition.attribute,
-                "来源文件": base.get("来源文件", ""),
-                "来源工作表": source_sheets,
-                "导入批次": base.get("导入批次", ""),
-                "计算逻辑": definition.formula,
-            })
+    for _, entity_rows in source.groupby(entity_grouping, dropna=False, sort=False):
+        for _, group in entity_rows.groupby("_期间组", dropna=False, sort=False):
+            values: dict[str, Any] = {}
+            for code, code_rows in group.groupby("指标编码", sort=False):
+                if str(code) in POLICY_SURPLUS_COMPONENT_CODES:
+                    code_rows = code_rows.loc[
+                        ~code_rows["来源类型"].fillna("").astype(str).eq("宽表空白推定")
+                    ]
+                candidates = pd.to_numeric(code_rows["数值"], errors="coerce").dropna()
+                if not candidates.empty:
+                    values[str(code)] = float(candidates.iloc[0])
+            base = group.iloc[0]
+            output_scope = base.get("_期间组", "本季度末数")
+            for definition in DERIVED_METRICS:
+                calculation_values = dict(values)
+                fallback_rows: list[pd.DataFrame] = []
+                fallback_dependencies: list[str] = []
+                for dependency in definition.dependencies:
+                    if dependency in calculation_values:
+                        continue
+                    allowed_scopes = derived_dependency_period_scopes(
+                        definition.code, dependency, output_scope
+                    )[1:]
+                    for fallback_scope in allowed_scopes:
+                        candidate_rows = entity_rows.loc[
+                            entity_rows["指标编码"].astype(str).eq(dependency)
+                            & entity_rows["_期间组"].eq(fallback_scope)
+                        ]
+                        candidates = pd.to_numeric(
+                            candidate_rows["数值"], errors="coerce"
+                        ).dropna()
+                        if candidates.empty:
+                            continue
+                        calculation_values[dependency] = float(candidates.iloc[0])
+                        fallback_rows.append(candidate_rows.loc[candidates.index[:1]])
+                        fallback_dependencies.append(dependency)
+                        break
+
+                value = calculate_derived_values(calculation_values).get(definition.code)
+                if value is None or (isinstance(value, float) and not math.isfinite(value)):
+                    continue
+                lineage_rows = (
+                    pd.concat([group, *fallback_rows]).loc[lambda item: ~item.index.duplicated(keep="first")]
+                    if fallback_rows
+                    else group
+                )
+                source_pages = "、".join(dict.fromkeys(
+                    str(item) for item in lineage_rows["来源页码"] if str(item).strip()
+                ))
+                source_sheets = "、".join(dict.fromkeys(
+                    str(item) for item in lineage_rows["来源工作表"] if str(item).strip()
+                ))
+                note = "由标准化基础指标自动计算"
+                if definition.code in POLICY_SURPLUS_RATIO_COMPONENTS:
+                    components = POLICY_SURPLUS_RATIO_COMPONENTS[definition.code]
+                    if any(code not in calculation_values for code in components):
+                        note = "仅汇总有披露数值的保单未来盈余层级；未披露层级未计入分子"
+                if fallback_dependencies:
+                    if definition.code == "TOTAL_ASSETS_TO_REGISTERED_CAPITAL":
+                        period_note = "总资产取本季度数，注册资本取本季度末数"
+                    else:
+                        period_note = "保险合同负债取本季度数，保单未来盈余取本季度末数"
+                    note = f"{note}；{period_note}"
+                derived_records.append({
+                    "公司": base.get("公司", ""),
+                    "原始公司名称": base.get("原始公司名称", ""),
+                    "标准公司名称": base.get("标准公司名称", ""),
+                    "公司统一编码": base.get("公司统一编码", ""),
+                    "公司类型": base.get("公司类型", ""),
+                    "同业分类": base.get("同业分类", ""),
+                    "报告类型": base.get("报告类型", ""),
+                    "报告年度": base.get("报告年度", ""),
+                    "报告季度": base.get("报告季度", ""),
+                    "报告期": base.get("报告期", ""),
+                    "披露日期": base.get("披露日期", ""),
+                    "一级模块": definition.level1,
+                    "二级模块": definition.level2,
+                    "行次": "",
+                    "指标编码": definition.code,
+                    "指标名称": definition.name,
+                    "期间口径": output_scope,
+                    "数值": value,
+                    "单位": definition.unit,
+                    "数据类型": definition.data_type,
+                    "是否预测": "是" if "预测" in str(output_scope) else "否",
+                    "来源页码": source_pages,
+                    "原始披露值": "",
+                    "备注": note,
+                    "来源类型": "系统计算",
+                    "指标属性": definition.attribute,
+                    "来源文件": base.get("来源文件", ""),
+                    "来源工作表": source_sheets,
+                    "导入批次": base.get("导入批次", ""),
+                    "计算逻辑": definition.formula,
+                })
 
     source = source.drop(columns=["_期间组"])
     if not derived_records:
@@ -652,7 +773,7 @@ def add_missing_derived_metrics(frame: pd.DataFrame) -> pd.DataFrame:
     candidate_by_key = dict(zip(row_keys(candidates), candidates.index))
     authoritative = existing["指标编码"].isin(AUTHORITATIVE_POLICY_SURPLUS_DERIVED_CODES)
     legacy_unavailable = (
-        existing["指标编码"].isin(POLICY_SURPLUS_RATIO_COMPONENTS)
+        existing["指标编码"].isin(derived_codes)
         & pd.to_numeric(existing["数值"], errors="coerce").isna()
         & existing["披露状态"].fillna("").astype(str).eq("无法计算")
     )
@@ -877,6 +998,7 @@ def convert_external_workbook(
         report_period = f"{year}{quarter}"
         frame = pd.read_excel(excel, sheet_name=sheet_name, header=0)
         frame.columns = [str(column).strip() for column in frame.columns]
+        frame = _drop_blank_excel_duplicate_columns(frame, sheet_name)
         missing_identifiers = IDENTIFIER_COLUMNS - set(frame.columns)
         if missing_identifiers:
             raise ValueError(f"工作表 {sheet_name} 缺少字段：{', '.join(sorted(missing_identifiers))}")
@@ -1227,6 +1349,7 @@ def _derived_excel_formula(code: str, references: dict[str, str]) -> str | None:
         "EQUITY_RISK_TO_ASSETS": ("EQUITY_RISK_CAPITAL", "RECOGNIZED_ASSETS"),
         "SPREAD_RISK_TO_ASSETS": ("SPREAD_RISK_CAPITAL", "RECOGNIZED_ASSETS"),
         "COUNTERPARTY_RISK_TO_ASSETS": ("COUNTERPARTY_RISK_CAPITAL", "RECOGNIZED_ASSETS"),
+        "INSURANCE_REVENUE_TO_SIGNED_PREMIUM": ("INSURANCE_REVENUE", "SIGNED_PREMIUM"),
         "TOTAL_ASSETS_TO_REGISTERED_CAPITAL": ("TOTAL_ASSETS", "REGISTERED_CAPITAL"),
     }
     if code in simple_ratios:
@@ -1277,6 +1400,16 @@ def _derived_excel_formula(code: str, references: dict[str, str]) -> str | None:
         return divide(add("CORE_T1_CAPITAL", "CORE_T2_CAPITAL"), ref("REGISTERED_CAPITAL"))
     if code == "REGISTERED_CAPITAL_TO_CORE_CAPITAL":
         return divide(ref("REGISTERED_CAPITAL"), add("CORE_T1_CAPITAL", "CORE_T2_CAPITAL"))
+    if code == "INSURANCE_CONTRACT_LIABILITY_TO_TOTAL_LIABILITIES":
+        return divide(
+            ref("INSURANCE_CONTRACT_LIABILITY"),
+            f'{ref("TOTAL_ASSETS")}-{ref("NET_ASSETS")}',
+        )
+    if code == "NEW_BUSINESS_VALUE_RATE":
+        return divide(
+            ref("NEW_BUSINESS_VALUE"),
+            f'{ref("SIGNED_PREMIUM")}-{ref("RENEWAL_PREMIUM")}',
+        )
     return None
 
 
@@ -1308,6 +1441,14 @@ def _formula_plan(
         optional_components = POLICY_SURPLUS_RATIO_COMPONENTS.get(code, ())
         for dependency in definition.dependencies:
             source_row = source_rows.get((entity_key, dependency))
+            if source_row is None:
+                for fallback_scope in derived_dependency_period_scopes(
+                    code, dependency, entity_key[-1]
+                )[1:]:
+                    fallback_key = (*entity_key[:-1], fallback_scope)
+                    source_row = source_rows.get((fallback_key, dependency))
+                    if source_row is not None:
+                        break
             if source_row is None:
                 if dependency in optional_components:
                     continue

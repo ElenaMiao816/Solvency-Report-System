@@ -720,6 +720,55 @@ class SolvencyNormalizerTests(unittest.TestCase):
         self.assertEqual(recognized_by_period["期末数"], 800)
         self.assertEqual(recognized_by_period["期初数"], 720)
 
+    def test_recognized_liabilities_multiheader_extracts_recognized_value_only(self):
+        taxonomy = pd.DataFrame([
+            {
+                "指标编码": "RESERVE_LIABILITIES",
+                "指标名称": "准备金负债",
+                "别名": "",
+                "一级模块": "认可负债",
+                "二级模块": "负债构成",
+                "标准单位": "万元",
+                "数据类型": "金额",
+            },
+            {
+                "指标编码": "RECOGNIZED_LIABILITIES",
+                "指标名称": "认可负债",
+                "别名": "认可负债合计|认可负债总额",
+                "一级模块": "主要指标",
+                "二级模块": "偿付能力",
+                "标准单位": "万元",
+                "数据类型": "金额",
+            },
+        ]).fillna("")
+        table = ExtractedTable(
+            table_id="RECOGNIZED_LIABILITIES",
+            table_name="S04-认可负债表",
+            page=36,
+            table_index=1,
+            rows=[
+                ["行次", "项目", "期末数", "", "", "期初数", "", ""],
+                ["", "", "账面价值", "非认可价值", "认可价值",
+                 "账面价值", "非认可价值", "认可价值"],
+                ["1", "准备金负债", "100", "20", "80", "90", "18", "72"],
+                ["8", "认可负债合计", "", "", "800", "", "", "720"],
+            ],
+            source_pages=[36],
+        )
+
+        result = normalize_tables([table], taxonomy, self.metadata, "寿险")
+
+        reserve = result[result["指标编码"] == "RESERVE_LIABILITIES"]
+        self.assertEqual(dict(zip(reserve["期间口径"], reserve["数值"])), {
+            "期末数": 80,
+            "期初数": 72,
+        })
+        total = result[result["指标编码"] == "RECOGNIZED_LIABILITIES"]
+        self.assertEqual(dict(zip(total["期间口径"], total["数值"])), {
+            "期末数": 800,
+            "期初数": 720,
+        })
+
     def test_recognized_assets_new_component_metrics_are_cataloged(self):
         taxonomy = load_taxonomy(ROOT / "config" / "solvency_taxonomy.xlsx")
         new_metrics = {

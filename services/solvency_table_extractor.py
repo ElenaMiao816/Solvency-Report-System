@@ -35,6 +35,7 @@ TABLE_EXCLUSIONS = {
     ),
     "ACTUAL_CAPITAL": ("认可资产表", "认可负债表", "最低资本表"),
     "RECOGNIZED_ASSETS": ("认可负债表", "最低资本表"),
+    "RECOGNIZED_LIABILITIES": ("认可资产表", "最低资本表"),
     "THREE_YEAR_INVESTMENT_RETURN": ("流动性覆盖率", "最低资本表"),
     "MINIMUM_CAPITAL": ("认可资产表", "认可负债表"),
 }
@@ -48,6 +49,10 @@ TABLE_HEADERS = {
     "OPERATING_METRICS": ("指标名称", "本季度", "本年累计"),
     "ACTUAL_CAPITAL": ("行次", "期末数", "期初数"),
     "RECOGNIZED_ASSETS": (
+        "行次", "项目", "期末数", "期初数",
+        "账面价值", "非认可价值", "认可价值",
+    ),
+    "RECOGNIZED_LIABILITIES": (
         "行次", "项目", "期末数", "期初数",
         "账面价值", "非认可价值", "认可价值",
     ),
@@ -80,6 +85,15 @@ TABLE_START_MARKERS = {
         "投资资产",
         "再保险资产",
     ),
+    "RECOGNIZED_LIABILITIES": (
+        "认可负债表",
+        "S04-认可负债表",
+        "S04认可负债表",
+        "认可负债明细表",
+        "准备金负债",
+        "金融负债",
+        "应付及预收款项",
+    ),
     "MINIMUM_CAPITAL": (
         "最低资本表",
         "最低资本",
@@ -102,6 +116,7 @@ TABLE_END_MARKERS = {
     ),
     "THREE_YEAR_INVESTMENT_RETURN": ("实际资本表", "认可资产表", "最低资本表"),
     "RECOGNIZED_ASSETS": ("认可负债表", "S04", "S05", "最低资本表"),
+    "RECOGNIZED_LIABILITIES": ("S05", "最低资本表"),
     "MINIMUM_CAPITAL": (),
 }
 

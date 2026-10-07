@@ -491,6 +491,56 @@ class Step3StandardizerTests(unittest.TestCase):
         self.assertAlmostEqual(values["POLICY_SURPLUS_CORE_TO_CORE_CAPITAL"], 20 / 120)
         self.assertAlmostEqual(values["POLICY_SURPLUS_TO_INSURANCE_LIABILITIES"], 25 / 250)
 
+    def test_balance_sheet_ratios_bridge_current_quarter_and_closing_periods(self):
+        taxonomy = extend_taxonomy(self.taxonomy)
+        catalog = step3_metric_catalog(taxonomy, include_derived=True)
+        target_codes = {
+            "TOTAL_ASSETS_TO_REGISTERED_CAPITAL",
+            "POLICY_SURPLUS_TO_INSURANCE_LIABILITIES",
+        }
+        target = catalog[catalog["指标编码"].isin(target_codes)].copy()
+        records = [
+            {"指标编码": "TOTAL_ASSETS", "状态": "found", "标准数值": 500, "原始值": "500", "期间口径": "本季度数"},
+            {"指标编码": "REGISTERED_CAPITAL", "状态": "found", "标准数值": 50, "原始值": "50", "期间口径": "本季度末数"},
+            {"指标编码": "POLICY_SURPLUS_CORE_T1", "状态": "found", "标准数值": 15, "原始值": "15", "期间口径": "本季度末数"},
+            {"指标编码": "POLICY_SURPLUS_ANC_T1", "状态": "found", "标准数值": 5, "原始值": "5", "期间口径": "本季度末数"},
+            {"指标编码": "INSURANCE_CONTRACT_LIABILITY", "状态": "found", "标准数值": 250, "原始值": "250", "期间口径": "本季度数"},
+        ]
+        result = standardize_to_target(
+            [ExtractedTable("TEST", "测试表", 1, 1, [], metric_records=records)],
+            taxonomy,
+            {"公司": "测试人寿保险有限公司", "报告年度": 2026, "报告季度": "Q2", "报告期": "2026Q2"},
+            "寿险",
+            target,
+            report_profile_id="LIFE_SOLVENCY",
+            allowed_company_types=("寿险", "健康险", "养老险"),
+            include_derived=True,
+        )
+        rows = result.data.set_index("指标编码")
+        self.assertAlmostEqual(rows.loc["TOTAL_ASSETS_TO_REGISTERED_CAPITAL", "数值"], 10.0)
+        self.assertAlmostEqual(rows.loc["POLICY_SURPLUS_TO_INSURANCE_LIABILITIES", "数值"], 0.08)
+        self.assertTrue(rows.loc[list(target_codes), "披露状态"].eq("已计算").all())
+
+        workbook = load_workbook(io.BytesIO(result_workbook_bytes(result)), data_only=False)
+        data_rows = list(workbook["标准数据"].iter_rows(values_only=True))
+        source_rows = list(workbook["计算依据"].iter_rows(values_only=True))
+        data_code_column = data_rows[0].index("指标编码")
+        data_value_column = data_rows[0].index("数值")
+        source_code_column = source_rows[0].index("指标编码")
+        source_period_column = source_rows[0].index("期间口径")
+        source_row_by_code_period = {
+            (row[source_code_column], row[source_period_column]): index
+            for index, row in enumerate(source_rows[1:], start=2)
+        }
+        formula_by_code = {
+            row[data_code_column]: row[data_value_column]
+            for row in data_rows[1:]
+        }
+        total_assets_row = source_row_by_code_period[("TOTAL_ASSETS", "本季度数")]
+        liability_row = source_row_by_code_period[("INSURANCE_CONTRACT_LIABILITY", "本季度数")]
+        self.assertIn(f"$I${total_assets_row}", formula_by_code["TOTAL_ASSETS_TO_REGISTERED_CAPITAL"])
+        self.assertIn(f"$I${liability_row}", formula_by_code["POLICY_SURPLUS_TO_INSURANCE_LIABILITIES"])
+
     def test_supplied_pdf_corrects_legacy_invented_policy_surplus_zeros(self):
         taxonomy = extend_taxonomy(self.taxonomy)
         catalog = step3_metric_catalog(taxonomy, include_derived=True)

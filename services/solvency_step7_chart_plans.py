@@ -72,6 +72,8 @@ SPECIAL_CHART_PLANS: dict[str, ChartPlan] = {
     ),
     "核心一级资本明细": ChartPlan(QUALITY_AND_CAPITAL, "最新报告期核心一级资本瀑布图"),
     "附属一级资本明细": ChartPlan(QUALITY_AND_CAPITAL, "最新报告期构成饼图"),
+    "保险合同负债/总负债": ChartPlan(QUALITY_AND_CAPITAL, "公司小图：季度占比柱形"),
+    "保险业务收入/签单保费": ChartPlan(QUALITY_AND_CAPITAL, "公司小图：季度占比柱形"),
     "签单保费与新业务利润率": ChartPlan(QUALITY_AND_CAPITAL, "公司小图：签单保费柱形与新业务利润率折线"),
     "新业务价值与新业务价值率": ChartPlan(QUALITY_AND_CAPITAL, "公司小图：新业务价值柱形与价值率折线"),
     "综合退保率": ChartPlan(QUALITY_AND_CAPITAL, "全部所选公司的综合退保率折线对比"),
@@ -101,6 +103,10 @@ SPECIAL_CHART_PLANS: dict[str, ChartPlan] = {
     "认可资产构成": ChartPlan(
         COMPONENT_STACK,
         "认可资产构成堆叠图（现金及流动性管理工具、投资资产、在子公司合营企业和联营企业中的权益、再保险资产、应收及预付款项、固定资产、土地使用权、独立账户资产、其他认可资产）",
+    ),
+    "认可负债构成": ChartPlan(
+        COMPONENT_STACK,
+        "认可负债构成堆叠图（准备金负债、金融负债、应付及预收款项、预计负债、独立账户负债、资本性负债、其它认可负债）",
     ),
     "增资发债信息统计": ChartPlan(
         FINANCING_TABLE,

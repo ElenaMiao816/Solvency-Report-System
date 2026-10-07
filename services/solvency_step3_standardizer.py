@@ -20,6 +20,7 @@ from .solvency_dataset_adapter import (
     POLICY_SURPLUS_RATIO_COMPONENTS,
     append_derived_metrics,
     canonical_period_scope,
+    derived_dependency_period_scopes,
     supported_metric_catalog,
     write_standard_workbook_sheets,
 )
@@ -43,6 +44,11 @@ from .solvency_pdf_locator import (
 
 TARGET_SHEET_NAME = "指标清单"
 STANDARD_SHEET_NAME = "标准数据"
+OPERATING_DERIVED_CODES = frozenset({
+    "INSURANCE_CONTRACT_LIABILITY_TO_TOTAL_LIABILITIES",
+    "INSURANCE_REVENUE_TO_SIGNED_PREMIUM",
+    "NEW_BUSINESS_VALUE_RATE",
+})
 TARGET_TEMPLATE_COLUMNS = [
     "启用",
     "指标编码",
@@ -508,7 +514,9 @@ def step3_metric_catalog(
             catalog[column] = catalog['指标编码'].map(lambda code: details.get(code, {}).get(column, ''))
     catalog.insert(0, "启用", "是")
     catalog['期间口径'] = catalog['指标编码'].map(
-        lambda code: '本季度' if code in THREE_YEAR_TARGET_CODES else '本季度末数')
+        lambda code: '本季度' if code in THREE_YEAR_TARGET_CODES
+        else '本季度数' if code in OPERATING_DERIVED_CODES
+        else '本季度末数')
     return catalog.reindex(columns=TARGET_TEMPLATE_COLUMNS).fillna('')
 
 
@@ -722,16 +730,23 @@ def _derived_unavailable_reason(
         for metric_code, metric in CUSTOM_METRICS_BY_CODE.items()
     })
     current = normalized.copy()
-    if not current.empty:
-        current = current[
-            current["期间口径"].map(canonical_period_scope).eq("本季度末数")
-        ]
+    periods = current.get("期间口径", pd.Series(index=current.index, dtype=object))
+    current["_期间组"] = periods.map(canonical_period_scope)
 
     missing: list[str] = []
     values: dict[str, float] = {}
     optional_components = POLICY_SURPLUS_RATIO_COMPONENTS.get(code, ())
     for dependency in definition.dependencies:
-        rows = current[current["指标编码"].astype(str).eq(dependency)]
+        output_scope = "本季度数" if code in OPERATING_DERIVED_CODES else "本季度末数"
+        allowed_scopes = derived_dependency_period_scopes(code, dependency, output_scope)
+        rows = current[
+            current["指标编码"].astype(str).eq(dependency)
+            & current["_期间组"].isin(allowed_scopes)
+        ].copy()
+        if not rows.empty:
+            scope_rank = {scope: rank for rank, scope in enumerate(allowed_scopes)}
+            rows["_期间优先级"] = rows["_期间组"].map(scope_rank).fillna(len(scope_rank))
+            rows = rows.sort_values("_期间优先级", kind="stable")
         numeric = pd.to_numeric(rows.get("数值", pd.Series(dtype=float)), errors="coerce").dropna()
         if not numeric.empty:
             values[dependency] = float(numeric.iloc[0])
@@ -756,6 +771,14 @@ def _derived_unavailable_reason(
         "INSURANCE_CONTRACT_LIABILITY", 0.0
     ) == 0:
         return "无法计算：保险合同负债为0"
+    if code == "INSURANCE_CONTRACT_LIABILITY_TO_TOTAL_LIABILITIES":
+        if values.get("TOTAL_ASSETS", 0.0) - values.get("NET_ASSETS", 0.0) == 0:
+            return "无法计算：总负债（总资产－净资产）为0"
+    if code == "INSURANCE_REVENUE_TO_SIGNED_PREMIUM" and values.get("SIGNED_PREMIUM", 0.0) == 0:
+        return "无法计算：签单保费为0"
+    if code == "NEW_BUSINESS_VALUE_RATE":
+        if values.get("SIGNED_PREMIUM", 0.0) - values.get("RENEWAL_PREMIUM", 0.0) == 0:
+            return "无法计算：签单保费－续期签单保费为0"
     return "无法计算：依赖指标期间口径不一致或数值无效"
 
 
@@ -874,7 +897,7 @@ def standardize_to_target(
             '报告季度': metadata.get('报告季度', ''), '报告期': metadata.get('报告期', ''),
             '披露日期': metadata.get('披露日期', ''), '一级模块': target['一级模块'],
             '二级模块': target['二级模块'], '指标编码': code, '指标名称': target['指标名称'],
-            '期间口径': '本季度' if code in THREE_YEAR_TARGET_CODES else '本季度末数', '数值': float('nan'), '单位': target['标准单位'],
+            '期间口径': '本季度' if code in THREE_YEAR_TARGET_CODES else '本季度数' if code in OPERATING_DERIVED_CODES else '本季度末数', '数值': float('nan'), '单位': target['标准单位'],
             '数据类型': target['数据类型'], '是否预测': '否', '来源页码': '',
             '原始披露值': '', '备注': _derived_unavailable_reason(code, normalized, taxonomy) if calculated else 'Step2中无对应近三年平均指标披露' if code in THREE_YEAR_TARGET_CODES else 'Step2中无对应本季度指标披露',
             '来源类型': '系统计算' if calculated else '报告提取', '指标属性': target['指标属性'],
@@ -980,3 +1003,4 @@ def result_workbook_bytes(result: Step3StandardizationResult) -> bytes:
             result.diagnostics.to_excel(writer, sheet_name="匹配诊断", index=False)
         _format_workbook(writer)
     return output.getvalue()
+

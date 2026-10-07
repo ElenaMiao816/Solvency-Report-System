@@ -91,6 +91,70 @@ class FakeResponse:
 
 
 class VLMV2PipelineTests(unittest.TestCase):
+    def test_three_year_exact_label_repairs_missing_evidence_shape(self):
+        repaired = vlm_pipeline._repair_three_year_evidence({
+            "metric_id": "INVESTMENT_RETURN",
+            "status": "found",
+            "value_raw": "3.77%",
+            "unit": "%",
+            "source_label": "近三年平均投资收益率",
+            "page": 12,
+        }, "INVESTMENT_RETURN")
+        self.assertEqual(repaired["evidence_text"], "近三年平均投资收益率 3.77%")
+        self.assertEqual(repaired["period_label"], "近三年平均")
+        self.assertEqual(repaired["row_header_path"], ["近三年平均投资收益率"])
+
+        unresolved = vlm_pipeline._repair_three_year_evidence({
+            "metric_id": "INVESTMENT_RETURN",
+            "status": "found",
+            "value_raw": "0.89%",
+            "unit": "%",
+            "source_label": "投资收益率",
+            "page": 12,
+        }, "INVESTMENT_RETURN")
+        self.assertFalse(unresolved.get("evidence_text"))
+
+    def test_actual_capital_uses_verified_response_table_unit_as_evidence(self):
+        card = vlm_pipeline.VLMV2TargetCard(
+            "ACTUAL_CAPITAL", "S02-实际资本表", "实际资本",
+            ({
+                "metric_id": "ANC_T2_CAPITAL",
+                "name": "附属二级资本",
+                "expected_unit": "万元",
+                "data_type": "金额",
+                "semantic_key": "ANC_T2_CAPITAL",
+            },),
+        )
+        match = PageMatch(
+            table_id="ACTUAL_CAPITAL", table_name="S02-实际资本表",
+            pages=[19], score=99, evidence="", table_config={},
+        )
+
+        def fake_post(_url, *, headers, json, timeout):
+            return FakeResponse({
+                "table_unit": "万元",
+                "unit_page": 19,
+                "unit_evidence": "单位：万元",
+                "metrics": [{
+                    "metric_id": "ANC_T2_CAPITAL", "status": "found",
+                    "value_raw": "1,222", "unit": "万元",
+                    "period_label": "期末数", "source_label": "附属二级资本",
+                    "page": 19, "evidence_text": "附属二级资本 1,222",
+                    "confidence": .99,
+                }],
+            })
+
+        rows, calls = vlm_pipeline._extract_card_records(
+            b"unused", match, card, api_key="x", base_url="https://x/v1",
+            model="v", timeout=90, request_max_attempts=1,
+            post_func=fake_post, page_image_cache={19: "data:image/jpeg;base64,page19"},
+            split_metrics=False, visible_policy_codes=frozenset(),
+        )
+        self.assertEqual(calls, 1)
+        self.assertEqual(rows[0]["单位"], "万元")
+        self.assertIn("物理页19同表表头", rows[0]["证据原文"])
+        self.assertIn("单位：万元", rows[0]["证据原文"])
+
     def test_policy_surplus_requires_a_visible_source_row_before_zero_is_accepted(self):
         labels = vlm_pipeline.POLICY_SURPLUS_SOURCE_LABELS
         card = vlm_pipeline.VLMV2TargetCard(
@@ -536,7 +600,7 @@ class VLMV2PipelineTests(unittest.TestCase):
         self.assertEqual(max_active_calls, 2)
 
     def test_locator_retries_only_timeout_batches_and_preserves_successes(self):
-        attempts = {1: 0, 7: 0, 13: 0}
+        attempts = {1: 0, 2: 0, 7: 0, 13: 0}
         captured_payloads = []
         lock = threading.Lock()
 
@@ -574,8 +638,8 @@ class VLMV2PipelineTests(unittest.TestCase):
             max_workers=2,
         )
 
-        self.assertEqual(attempts, {1: 2, 7: 1, 13: 1})
-        self.assertEqual(run.model_calls, 4)
+        self.assertEqual(attempts, {1: 2, 2: 1, 7: 2, 13: 1})
+        self.assertEqual(run.model_calls, 6)
         self.assertEqual(run.matches[0].pages, [2, 7])
         self.assertTrue(all(
             payload["thinking"] == {"type": "disabled"}

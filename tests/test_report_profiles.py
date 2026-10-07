@@ -29,9 +29,9 @@ class ReportProfileTests(unittest.TestCase):
         self.assertEqual(profile.workbook_schema_version, "2.0")
         self.assertEqual(profile.config_version, "2.0")
         self.assertEqual(profile.analysis["comparison_scope"], "WITHIN_PROFILE")
-        self.assertEqual(len(profile.tables), 7)
-        self.assertEqual(len(profile.layout_variants), 13)
-        self.assertEqual(len(profile.completeness_rules), 6)
+        self.assertEqual(len(profile.tables), 8)
+        self.assertEqual(len(profile.layout_variants), 14)
+        self.assertEqual(len(profile.completeness_rules), 7)
         self.assertTrue(
             all(table.get("strategy_id") for table in profile.tables)
         )
@@ -45,6 +45,7 @@ class ReportProfileTests(unittest.TestCase):
                 "THREE_YEAR_INVESTMENT_RETURN",
                 "MINIMUM_CAPITAL",
                 "RECOGNIZED_ASSETS",
+                "RECOGNIZED_LIABILITIES",
             },
         )
 
@@ -99,8 +100,8 @@ class ReportProfileTests(unittest.TestCase):
                     restored_table.get(stage_field),
                     original.get(stage_field),
                 )
-        self.assertEqual(len(restored.layout_variants), 13)
-        self.assertEqual(len(restored.completeness_rules), 6)
+        self.assertEqual(len(restored.layout_variants), 14)
+        self.assertEqual(len(restored.completeness_rules), 7)
 
     def test_life_v2_tables_expose_profile_driven_stage_parameters(self):
         profile = load_profile_registry(
@@ -133,6 +134,14 @@ class ReportProfileTests(unittest.TestCase):
         )
         self.assertEqual(
             tables["RECOGNIZED_ASSETS"]["canonical_headers"],
+            ["行次", "项目", "期末数", "期初数"],
+        )
+        self.assertEqual(
+            tables["RECOGNIZED_LIABILITIES"]["postprocess_actions"],
+            ["simplify_recognized_liabilities_columns", "normalize_recognized_liabilities_total", "trim_adjacent_rows"],
+        )
+        self.assertEqual(
+            tables["RECOGNIZED_LIABILITIES"]["canonical_headers"],
             ["行次", "项目", "期末数", "期初数"],
         )
 

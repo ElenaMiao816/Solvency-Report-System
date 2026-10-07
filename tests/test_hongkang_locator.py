@@ -10,7 +10,7 @@ from PIL import Image
 import requests
 
 from services.solvency_locator_recovery import (
-    bounded_review_pages, latest_scan_failures, operating_section_closed,
+    _catalog_title_candidate, bounded_review_pages, latest_scan_failures, operating_section_closed,
     render_review_sheets, text_page_catalog,
 )
 from services.solvency_vlm_v2_pipeline import locate_tables_vlm_v2
@@ -19,6 +19,7 @@ from tests.test_vlm_v2_pipeline import FakeResponse, minimal_taxonomy, image_onl
 
 
 PDF = Path(r'F:\CROSS\V1\弘康人寿2026Q1偿付能力季度报告摘要.pdf')
+ICBC_ALLIANZ_PDF = Path(r'F:\CROSS\V1\工银安盛2026Q2偿付能力季度报告摘要.pdf')
 CATALOG = [dict(page=21, titles=['九、实际资本', '（一）实际资本表']),
            dict(page=22, titles=['（二）认可资产表']), dict(page=25, titles=['（三）认可负债表']),
            dict(page=26, titles=['十、最低资本'])]
@@ -28,6 +29,18 @@ EXPECTED = dict(SOLVENCY_MAIN=[9], OPERATING_METRICS=[11], REGISTERED_CAPITAL=[2
 
 
 class RecoveryHelpersTests(unittest.TestCase):
+    def test_regulator_form_codes_are_valid_catalog_titles(self):
+        for title in ('S02-实际资本表', 'S03-认可资产表', 'S04-认可负债表', 'S05-最低资本表'):
+            self.assertTrue(_catalog_title_candidate(title))
+        for non_title in ('2026年第2季度', '40,331,114', '说明：本表数据如下'):
+            self.assertFalse(_catalog_title_candidate(non_title))
+
+    def test_main_table_hit_rechecks_one_unlabelled_continuation_page(self):
+        hits = [hit(10, '偿付能力充足率指标')]
+        self.assertEqual(bounded_review_pages('SOLVENCY_MAIN', hits, [], 24), [10, 11])
+        complete = hits + [hit(11, '主表续页', 'continuation')]
+        self.assertEqual(bounded_review_pages('SOLVENCY_MAIN', complete, [], 24), [])
+
     def test_heading_candidates_exclude_summary_toc_and_liabilities(self):
         catalog = CATALOG + [dict(page=3, titles=['实际资本表…………18']),
                              dict(page=9, titles=['偿付能力充足率指标'])]
@@ -78,8 +91,46 @@ class RecoveryHelpersTests(unittest.TestCase):
             with Image.open(io.BytesIO(raw)) as im:
                 self.assertGreaterEqual(im.width, 1500)
 
+    @unittest.skipUnless(ICBC_ALLIANZ_PDF.exists(), 'Local PDF unavailable')
+    def test_icbc_allianz_s04_title_is_recoverable(self):
+        catalog = text_page_catalog(ICBC_ALLIANZ_PDF.read_bytes())
+        page_23 = next(item for item in catalog if item['page'] == 23)
+        self.assertIn('S04-认可负债表', page_23['titles'])
+        self.assertEqual(bounded_review_pages('RECOGNIZED_LIABILITIES', [], catalog, 24), [23])
+        self.assertEqual(
+            bounded_review_pages('SOLVENCY_MAIN', [hit(10, '偿付能力充足率指标')], catalog, 24),
+            [10, 11],
+        )
+
 
 class HongkangPipelineTests(unittest.TestCase):
+    def test_main_table_continuation_is_visually_recovered(self):
+        calls = []
+
+        def post(url, *, headers, json: dict, timeout):
+            prompt = json['messages'][0]['content'][0]['text']
+            focused = '这是缺失表/无标题续页高清复核' in prompt
+            calls.append(focused)
+            hits = [hit(1, '偿付能力充足率指标')]
+            if focused:
+                hits.append(hit(2, '最低资本及偿付能力充足率', 'continuation'))
+            return FakeResponse(dict(targets=[dict(
+                table_id='SOLVENCY_MAIN', found=True, page_hits=hits,
+            )], page_catalog=[]))
+
+        configs = [dict(table_id='SOLVENCY_MAIN', table_name='偿付能力充足率指标')]
+        sheets = [((1, 2), 'data:image/jpeg;base64,test')]
+        review = lambda data, pages: [(tuple(pages), 'data:image/jpeg;base64,test')]
+        with patch('services.solvency_vlm_v2_pipeline.render_vlm_v2_contact_sheets', return_value=sheets), \
+             patch('services.solvency_vlm_v2_pipeline.text_page_catalog', return_value=[]), \
+             patch('services.solvency_vlm_v2_pipeline.render_review_sheets', side_effect=review):
+            run = locate_tables_vlm_v2(
+                b'pdf', configs, minimal_taxonomy(), api_key='test',
+                base_url='https://api.moonshot.cn/v1', model='kimi-k2.6', post_func=post,
+            )
+        self.assertEqual(run.matches[0].pages, [1, 2])
+        self.assertEqual(calls, [False, True])
+
     def run_case(self, *, scan_timeout=False, review_timeout=False, partial=False,
                  reject=False, visual_catalog=False, no_hints=False, real=False):
         calls = []
@@ -139,8 +190,8 @@ class HongkangPipelineTests(unittest.TestCase):
         run, calls = self.run_case()
         self.assertEqual({m.table_id:m.pages for m in run.matches}, EXPECTED)
         self.assertFalse(any(m.review_required for m in run.matches))
-        self.assertEqual(run.model_calls, 7)
-        self.assertEqual([p for p, focused in calls if focused], [[21,22], [23,24]])
+        self.assertEqual(run.model_calls, 8)
+        self.assertEqual([p for p, focused in calls if focused], [[9,10], [21,22], [23,24]])
 
     def test_scanned_visual_catalog_recovers_same_missing_ranges(self):
         run, _ = self.run_case(visual_catalog=True)

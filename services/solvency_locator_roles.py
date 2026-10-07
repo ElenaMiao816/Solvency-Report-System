@@ -14,6 +14,7 @@ LOCATOR_SCOPE_RULES = {
     'SOLVENCY_MAIN': '优先主要指标章节的偿付能力充足率指标主表；管理层分析、偿付能力变化及原因分析的重复数据标reference，不与主表合并。',
     'ACTUAL_CAPITAL': '只定位实际资本明细主体及续表（S02或实际资本表），应有净资产调整、保单未来盈余等明细；偿付能力充足率指标中核心/附属资本几行合计仅标summary，不能当S02。标题不要求含S02。',
     'RECOGNIZED_ASSETS': '定位认可资产分项与认可价值列（S03或认可资产表）；合计数出现不代表明细表，非认可资产表、认可负债表不能替代。允许与实际资本表共用一页。',
+    'RECOGNIZED_LIABILITIES': '定位认可负债分项与认可价值列（S04或认可负债表）；合计数出现不代表明细表，认可资产表、最低资本表不能替代。允许与认可资产表或最低资本表共用一页。',
     'MINIMUM_CAPITAL': '定位最低资本明细主体及续表（S05或最低资本章节），含保险/市场/信用风险及分散效应等分项；主要指标表仅量化风险/可资本化风险、控制风险、附加资本合计标summary，不能当S05。',
     'OPERATING_METRICS': '完整覆盖实际披露的经营指标分项：主要经营指标、效益类、规模类/分渠道、前五位产品、品质类；不同公司可没有某些分项，不要求全部存在。无重复总标题的产品/品质续页也必须返回；不能看到近三年收益率标题就忽略同页上半部分经营数据。',
     'THREE_YEAR_INVESTMENT_RETURN': '仅近三年平均投资收益率及近三年平均综合投资收益率，不能拿普通本季度收益率替代；同页可能还包含经营指标，允许多目标同时命中。',
@@ -38,6 +39,7 @@ def page_role(table_id, title, evidence, declared=''):
     primary_patterns = {
         'ACTUAL_CAPITAL': r'S0?2|实际资本(?:明细)?表|^[十\d一二三四五六七八九、.()（）]*实际资本$',
         'RECOGNIZED_ASSETS': r'S0?3|(?<!非)认可资产(?:明细)?表',
+        'RECOGNIZED_LIABILITIES': r'S0?4|认可负债(?:明细)?表',
         'MINIMUM_CAPITAL': r'S0?5|最低资本(?:明细)?表|^[十\d一二三四五六七八九、.()（）]*最低资本$',
         'SOLVENCY_MAIN': r'偿付能力(?:充足率)?(?:主要)?指标|偿付能力状况|Solvencysummary',
         'OPERATING_METRICS': r'经营指标|效益类|规模类|品质类|前五[位大]|分渠道',
@@ -46,9 +48,11 @@ def page_role(table_id, title, evidence, declared=''):
     }
     if table_id == 'RECOGNIZED_ASSETS' and re.search(r'非认可资产(?:明细)?表|认可负债(?:明细)?表', title) and not re.search(r'(?<!非)认可资产(?:明细)?表', title):
         return 'reference'
+    if table_id == 'RECOGNIZED_LIABILITIES' and re.search(r'认可资产(?:明细)?表|最低资本(?:明细)?表', title) and not re.search(r'认可负债(?:明细)?表', title):
+        return 'reference'
     if re.search(primary_patterns.get(table_id, r'(?!)'), title, re.I):
         return 'continuation' if declared == 'continuation' or '续表' in title else 'primary'
-    if table_id in {'ACTUAL_CAPITAL', 'RECOGNIZED_ASSETS', 'MINIMUM_CAPITAL'} and re.search(r'偿付能力.*指标|主要指标|资本充足率|汇总|摘要', text):
+    if table_id in {'ACTUAL_CAPITAL', 'RECOGNIZED_ASSETS', 'RECOGNIZED_LIABILITIES', 'MINIMUM_CAPITAL'} and re.search(r'偿付能力.*指标|主要指标|资本充足率|汇总|摘要', text):
         return 'summary'
     if declared in {'primary', 'continuation', 'summary', 'reference', 'toc'}:
         return declared

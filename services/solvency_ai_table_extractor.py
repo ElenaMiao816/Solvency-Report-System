@@ -81,6 +81,12 @@ TABLE_COMPLETENESS_TERMS = {
         "再保险资产",
         "认可资产合计",
     ),
+    "RECOGNIZED_LIABILITIES": (
+        "准备金负债",
+        "金融负债",
+        "应付及预收款项",
+        "认可负债合计",
+    ),
 }
 
 TABLE_MIN_NUMERIC_ROWS = {
@@ -106,6 +112,7 @@ AI_TABLE_END_MARKERS = {
     ),
     "THREE_YEAR_INVESTMENT_RETURN": ("S02", "实际资本表", "实际资本明细表", "最低资本表"),
     "RECOGNIZED_ASSETS": ("S04", "认可负债表", "最低资本表"),
+    "RECOGNIZED_LIABILITIES": ("S03", "认可资产表", "S05", "最低资本表"),
     "MINIMUM_CAPITAL": ("S06", "风险综合评级", "偿付能力风险管理评估", "风险管理能力"),
 }
 
@@ -1347,6 +1354,8 @@ def _source_completeness_profile_core(
                     canonical_item = "实际资本合计"
                 elif table_id == "RECOGNIZED_ASSETS":
                     canonical_item = "认可资产合计"
+                elif table_id == "RECOGNIZED_LIABILITIES":
+                    canonical_item = "认可负债合计"
             required_terms.append(canonical_item)
 
     numeric_rows = 0

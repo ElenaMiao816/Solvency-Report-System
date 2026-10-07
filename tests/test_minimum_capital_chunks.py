@@ -37,7 +37,8 @@ class MinimumCapitalChunkTests(unittest.TestCase):
         self.fixture = {e['code']: (e['name'], raw, 32 if i < 27 else 33)
                         for i, (e, raw) in enumerate(zip(entries, raw_values))}
 
-    def run_case(self, failure='', permanent=False, attempts_allowed=2, real_pdf=None):
+    def run_case(self, failure='', permanent=False, attempts_allowed=2, real_pdf=None,
+                 oversized_retry=False):
         attempts, seen = Counter(), []
         def post(_url, *, headers, json: dict, timeout):
             content = json['messages'][0]['content']
@@ -53,6 +54,8 @@ class MinimumCapitalChunkTests(unittest.TestCase):
             self.assertEqual(timeout, 90)
             attempts[codes] += 1
             seen.append(codes)
+            if oversized_retry and 'CREDIT_RISK_CAPITAL' in codes and len(codes) > 6:
+                raise requests.ReadTimeout('test oversized minimum batch')
             if failure and 'CREDIT_RISK_CAPITAL' in codes and (permanent or attempts[codes] == 1):
                 if failure == 'timeout':
                     raise requests.ReadTimeout('test minimum chunk timeout')
@@ -102,12 +105,23 @@ class MinimumCapitalChunkTests(unittest.TestCase):
 
     def test_permanent_failure_keeps_success_and_blocks_false_non_disclosure(self):
         run, attempts, seen = self.run_case('timeout', permanent=True)
-        self.assertEqual(sorted(attempts.values()), [1, 1, 2])
+        self.assertEqual(sorted(attempts.values()), [1, 1, 1, 1, 2])
+        self.assertEqual(run.model_calls, 6)
+        self.assertEqual(run.retry_calls, 3)
         successful = {code for codes in seen if 'CREDIT_RISK_CAPITAL' not in codes for code in codes}
         self.assertEqual(set(run.records['指标编码']), successful)
         self.assertFalse(evaluate_vlm_v2_step3_gate(run).passed)
         coverage = run.validations[run.validations['规则'].eq('请求覆盖完整性')].iloc[0]
         self.assertIn('test minimum chunk timeout', coverage['说明'])
+
+    def test_repeated_oversized_failure_is_recovered_with_smaller_batches(self):
+        run, attempts, seen = self.run_case(oversized_retry=True)
+        self.assertEqual(sorted(attempts.values()), [1, 1, 1, 1, 2])
+        self.assertEqual(run.model_calls, 6)
+        self.assertEqual(run.retry_calls, 3)
+        self.assertTrue(evaluate_vlm_v2_step3_gate(run).passed)
+        self.assertEqual(len(run.records), 34)
+        self.assertTrue(any(len(codes) == 6 for codes in seen))
 
     def test_retry_limit_one_does_not_repeat_failed_chunk(self):
         run, attempts, seen = self.run_case('timeout', attempts_allowed=1)

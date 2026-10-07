@@ -28,6 +28,7 @@ from services.solvency_navigation import (
     MARKET_RISK_ASSET_SCATTER,
     OVERVIEW_LEVEL,
     PRINT_ALL_LABEL,
+    RECOGNIZED_ASSET_LIABILITY_LEVEL,
     RECOGNIZED_ASSETS_LEVEL,
     OPERATING_QUALITY_LEVEL,
     apply_navigation_labels,
@@ -48,7 +49,7 @@ class SolvencyNavigationTests(unittest.TestCase):
                 COMPANY_OVERVIEW_LEVEL,
                 ACTUAL_CAPITAL_LEVEL,
                 MINIMUM_CAPITAL_LEVEL,
-                RECOGNIZED_ASSETS_LEVEL,
+                RECOGNIZED_ASSET_LIABILITY_LEVEL,
                 OPERATING_QUALITY_LEVEL,
                 APPENDIX_LEVEL,
                 PRINT_ALL_LABEL,
@@ -77,6 +78,8 @@ class SolvencyNavigationTests(unittest.TestCase):
         self.assertNotIn("各类信用风险", chart_names(MINIMUM_CAPITAL_LEVEL, "信用风险"))
         credit_codes = metric_codes_for_chart("各类信用风险占比")
         self.assertIn("CREDIT_RISK_CAPITAL", credit_codes)
+        self.assertEqual(RECOGNIZED_ASSETS_LEVEL, "认可资产负债数据对比")
+        self.assertEqual(second_levels(RECOGNIZED_ASSET_LIABILITY_LEVEL), ["资产构成情况", "负债构成情况"])
         self.assertIn("认可资产构成", chart_names(RECOGNIZED_ASSETS_LEVEL, "全部"))
         self.assertEqual(
             metric_codes_for_chart("认可资产构成"),
@@ -86,6 +89,19 @@ class SolvencyNavigationTests(unittest.TestCase):
                 "RECEIVABLES_AND_PREPAYMENTS", "FIXED_ASSETS",
                 "LAND_USE_RIGHTS", "SEPARATE_ACCOUNT_ASSETS",
                 "OTHER_RECOGNIZED_ASSETS",
+            ),
+        )
+        self.assertEqual(
+            chart_names(RECOGNIZED_ASSET_LIABILITY_LEVEL, "负债构成情况"),
+            ["认可负债构成"],
+        )
+        self.assertEqual(
+            metric_codes_for_chart("认可负债构成"),
+            (
+                "RESERVE_LIABILITIES", "FINANCIAL_LIABILITIES",
+                "PAYABLES_AND_ADVANCES", "PROVISIONS",
+                "SEPARATE_ACCOUNT_LIABILITY", "CAPITAL_LIABILITIES",
+                "OTHER_RECOGNIZED_LIABILITIES",
             ),
         )
         self.assertEqual(
@@ -353,7 +369,7 @@ class SolvencyNavigationTests(unittest.TestCase):
     def test_operating_quality_remains_visible_for_undisclosed_companies(self):
         self.assertIn(OPERATING_QUALITY_LEVEL, first_levels_for_codes([]))
         self.assertEqual(second_levels(OPERATING_QUALITY_LEVEL), ["业务质量指标", "投资质量指标"])
-        self.assertEqual(len(chart_names(OPERATING_QUALITY_LEVEL, "全部", available_codes=[])), 6)
+        self.assertEqual(len(chart_names(OPERATING_QUALITY_LEVEL, "全部", available_codes=[])), 8)
 
     def test_capital_stack_requires_all_four_metric_codes(self):
         only_core = {"CORE_T1_CAPITAL"}

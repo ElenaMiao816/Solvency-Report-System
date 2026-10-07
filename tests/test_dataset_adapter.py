@@ -132,6 +132,41 @@ class DatasetAdapterTests(unittest.TestCase):
         ]
         self.assertTrue(ancillary.empty)
 
+    def test_external_conversion_ignores_blank_duplicate_excel_metric_column(self):
+        source = pd.DataFrame(
+            [["小型公司", "测试人寿", 50.0, None]],
+            columns=["分类", "公司", "独立账户负债", "独立账户负债"],
+        )
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            source.to_excel(writer, sheet_name="2026Q2", index=False)
+        taxonomy_path = Path(__file__).parents[1] / "config" / "solvency_taxonomy.xlsx"
+        taxonomy = extend_taxonomy(load_taxonomy(taxonomy_path))
+
+        result = convert_external_workbook(output.getvalue(), "duplicate.xlsx", taxonomy)
+        rows = result.data.loc[
+            result.data["指标编码"].eq("SEPARATE_ACCOUNT_LIABILITY")
+            & result.data["原始公司名称"].eq("测试人寿")
+            & result.data["来源类型"].eq("外部数据集")
+        ]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(float(rows.iloc[0]["数值"]), 50.0)
+        self.assertNotIn("独立账户负债.1", set(result.mapping_summary["来源字段"]))
+
+    def test_external_conversion_rejects_populated_duplicate_metric_columns(self):
+        source = pd.DataFrame(
+            [["小型公司", "测试人寿", 50.0, 60.0]],
+            columns=["分类", "公司", "独立账户负债", "独立账户负债"],
+        )
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            source.to_excel(writer, sheet_name="2026Q2", index=False)
+        taxonomy_path = Path(__file__).parents[1] / "config" / "solvency_taxonomy.xlsx"
+        taxonomy = extend_taxonomy(load_taxonomy(taxonomy_path))
+
+        with self.assertRaisesRegex(ValueError, "有数据的同名重复指标列：独立账户负债"):
+            convert_external_workbook(output.getvalue(), "duplicate.xlsx", taxonomy)
+
     def test_external_investment_scopes_preserve_percentage_points(self):
         source = pd.DataFrame([{
             "分类": "小型公司", "公司": "测试人寿",
@@ -223,6 +258,11 @@ class DatasetAdapterTests(unittest.TestCase):
             "SPREAD_RISK_CAPITAL": 7.0,
             "COUNTERPARTY_RISK_CAPITAL": 6.0,
             "TOTAL_ASSETS": 600.0,
+            "NET_ASSETS": 100.0,
+            "INSURANCE_REVENUE": 80.0,
+            "SIGNED_PREMIUM": 100.0,
+            "RENEWAL_PREMIUM": 40.0,
+            "NEW_BUSINESS_VALUE": 15.0,
         }
         result = calculate_derived_values(values)
         self.assertAlmostEqual(result["ACTUAL_CAPITAL_TO_RECOGNIZED_ASSETS"], 0.4)
@@ -236,6 +276,9 @@ class DatasetAdapterTests(unittest.TestCase):
         self.assertAlmostEqual(result["REGISTERED_CAPITAL_TO_CORE_CAPITAL"], 50.0 / 140.0)
         self.assertAlmostEqual(result["LIFE_INSURANCE_RISK_TO_QUANT_CAPITAL"], 40.0 / 90.0)
         self.assertAlmostEqual(result["DIVERSIFICATION_EFFECT_TO_QUANT_CAPITAL"], -10.0 / 90.0)
+        self.assertAlmostEqual(result["INSURANCE_CONTRACT_LIABILITY_TO_TOTAL_LIABILITIES"], 250.0 / 500.0)
+        self.assertAlmostEqual(result["INSURANCE_REVENUE_TO_SIGNED_PREMIUM"], 80.0 / 100.0)
+        self.assertAlmostEqual(result["NEW_BUSINESS_VALUE_RATE"], 15.0 / 60.0)
         self.assertEqual(result["POLICY_SURPLUS_CORE_BAND"], "(0,20%]")
         legacy_only = calculate_derived_values({"CORE_CAPITAL_TO_REGISTERED_CAPITAL": 2.8})
         self.assertAlmostEqual(legacy_only["REGISTERED_CAPITAL_TO_CORE_CAPITAL"], 1.0 / 2.8)
@@ -299,6 +342,71 @@ class DatasetAdapterTests(unittest.TestCase):
         self.assertEqual(ratio["来源类型"], "系统计算")
         self.assertEqual(ratio["期间口径"], "本季度末数")
         self.assertTrue(ratio["计算逻辑"])
+
+    def test_balance_sheet_ratios_use_current_quarter_values_with_closing_capital(self):
+        rows = []
+        period_values = {
+            "本季度末数": {
+                "REGISTERED_CAPITAL": 50.0,
+                "ACTUAL_CAPITAL": 40.0,
+                "POLICY_SURPLUS_CORE_T1": 15.0,
+                "POLICY_SURPLUS_ANC_T1": 5.0,
+            },
+            "本季度数": {
+                "TOTAL_ASSETS": 500.0,
+                "INSURANCE_CONTRACT_LIABILITY": 250.0,
+                "RECOGNIZED_ASSETS": 100.0,
+            },
+        }
+        for period, values in period_values.items():
+            for code, value in values.items():
+                rows.append({
+                    "公司": "测试人寿",
+                    "公司类型": "寿险",
+                    "报告年度": 2026,
+                    "报告季度": "Q2",
+                    "报告期": "2026Q2",
+                    "期间口径": period,
+                    "指标编码": code,
+                    "指标名称": code,
+                    "数值": value,
+                    "来源页码": "10",
+                    "来源工作表": "测试表",
+                })
+
+        result = append_derived_metrics(pd.DataFrame(rows))
+        closing = result[result["期间口径"].eq("本季度末数")].set_index("指标编码")
+
+        self.assertAlmostEqual(closing.loc["TOTAL_ASSETS_TO_REGISTERED_CAPITAL", "数值"], 10.0)
+        self.assertAlmostEqual(
+            closing.loc["POLICY_SURPLUS_TO_INSURANCE_LIABILITIES", "数值"],
+            20.0 / 250.0,
+        )
+        self.assertIn("总资产取本季度数", closing.loc["TOTAL_ASSETS_TO_REGISTERED_CAPITAL", "备注"])
+        self.assertIn(
+            "保险合同负债取本季度数",
+            closing.loc["POLICY_SURPLUS_TO_INSURANCE_LIABILITIES", "备注"],
+        )
+        self.assertNotIn("ACTUAL_CAPITAL_TO_RECOGNIZED_ASSETS", closing.index)
+
+        legacy_rows = rows + [{
+            "公司": "测试人寿",
+            "公司类型": "寿险",
+            "报告年度": 2026,
+            "报告季度": "Q2",
+            "报告期": "2026Q2",
+            "期间口径": "本季度末数",
+            "指标编码": "TOTAL_ASSETS_TO_REGISTERED_CAPITAL",
+            "指标名称": "总资产/注册资本",
+            "数值": None,
+            "披露状态": "无法计算",
+        }]
+        repaired = add_missing_derived_metrics(pd.DataFrame(legacy_rows))
+        repaired_ratio = repaired.loc[
+            repaired["指标编码"].eq("TOTAL_ASSETS_TO_REGISTERED_CAPITAL")
+        ].iloc[0]
+        self.assertAlmostEqual(repaired_ratio["数值"], 10.0)
+        self.assertEqual(repaired_ratio["披露状态"], "已计算")
 
     def test_policy_surplus_derived_metrics_bridge_opening_and_closing_periods(self):
         rows = []

@@ -29,6 +29,8 @@ PDF = Path(r'F:\CROSS\V1\华汇人寿2026Q1偿付能力季度报告摘要.pdf')
 class AssetColumnGuards(unittest.TestCase):
     def test_detail_titles_are_primary_and_other_tables_are_not(self):
         self.assertEqual(page_role('RECOGNIZED_ASSETS', '（二）认可资产明细表', ''), 'primary')
+        self.assertEqual(page_role('RECOGNIZED_LIABILITIES', 'S04-认可负债表', ''), 'primary')
+        self.assertEqual(page_role('RECOGNIZED_LIABILITIES', 'S05-最低资本表', '', 'primary'), 'reference')
         for title in ('非认可资产明细表', '认可负债明细表'):
             self.assertEqual(page_role('RECOGNIZED_ASSETS', title, '', 'primary'), 'reference')
 

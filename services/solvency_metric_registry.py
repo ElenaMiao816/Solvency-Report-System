@@ -20,6 +20,7 @@ class MetricDefinition:
     dependencies: tuple[str, ...] = ()
     external_transform: str = "identity"
     step5_wide_mapping: str = "是"
+    allowed_periods: str = "本季度末数|上季度末数|下季度末预测数|期末数|期初数"
 
     def taxonomy_row(self) -> dict:
         return {
@@ -31,7 +32,7 @@ class MetricDefinition:
             "标准单位": self.unit,
             "数据类型": self.data_type,
             "核心指标": "否",
-            "允许期间口径": "本季度末数|上季度末数|下季度末预测数|期末数|期初数",
+            "允许期间口径": self.allowed_periods,
             "说明": self.formula,
             "STEP5宽表映射": self.step5_wide_mapping,
         }
@@ -80,7 +81,11 @@ SUPPLEMENTAL_BASE_METRICS = (
     MetricDefinition("FOREIGN_EXCHANGE_RISK_CAPITAL", "市场风险-汇率风险最低资本", "最低资本", "市场风险", "万元", "金额", "披露", ("汇率风险最低资本",)),
     MetricDefinition("MARKET_RISK_DIVERSIFICATION_EFFECT", "市场风险-风险分散效应", "最低资本", "市场风险", "万元", "金额", "披露"),
     MetricDefinition("CREDIT_RISK_DIVERSIFICATION_EFFECT", "信用风险-风险分散效应", "最低资本", "信用风险", "万元", "金额", "披露"),
-    MetricDefinition("SEPARATE_ACCOUNT_LIABILITY", "独立账户负债", "经营指标", "资产负债", "万元", "金额", "披露"),
+    MetricDefinition("PAYABLES_AND_ADVANCES", "应付及预收款项", "认可负债", "负债构成", "万元", "金额", "披露", ("应付款项及预收款项",)),
+    MetricDefinition("PROVISIONS", "预计负债", "认可负债", "负债构成", "万元", "金额", "披露"),
+    MetricDefinition("SEPARATE_ACCOUNT_LIABILITY", "独立账户负债", "认可负债", "负债构成", "万元", "金额", "披露"),
+    MetricDefinition("CAPITAL_LIABILITIES", "资本性负债", "认可负债", "负债构成", "万元", "金额", "披露"),
+    MetricDefinition("OTHER_RECOGNIZED_LIABILITIES", "其它认可负债", "认可负债", "负债构成", "万元", "金额", "披露", ("其他认可负债",)),
     MetricDefinition("POLICY_SURPLUS_CORE_T1", "计入核心一级资本的保单未来盈余", "实际资本", "保单未来盈余", "万元", "金额", "披露"),
     MetricDefinition("POLICY_SURPLUS_CORE_T2", "计入核心二级资本的保单未来盈余", "实际资本", "保单未来盈余", "万元", "金额", "披露"),
     MetricDefinition("POLICY_SURPLUS_ANC_T1", "计入附属一级资本的保单未来盈余", "实际资本", "保单未来盈余", "万元", "金额", "披露"),
@@ -240,6 +245,27 @@ DERIVED_METRICS = (
     MetricDefinition("EQUITY_RISK_TO_ASSETS", "权益价格风险/认可资产", "派生指标", "风险结构", "倍", "比率", "计算", formula="权益价格风险最低资本/认可资产", dependencies=("EQUITY_RISK_CAPITAL", "RECOGNIZED_ASSETS")),
     MetricDefinition("SPREAD_RISK_TO_ASSETS", "利差风险/认可资产", "派生指标", "风险结构", "倍", "比率", "计算", formula="利差风险最低资本/认可资产", dependencies=("SPREAD_RISK_CAPITAL", "RECOGNIZED_ASSETS")),
     MetricDefinition("COUNTERPARTY_RISK_TO_ASSETS", "交易对手违约风险/认可资产", "派生指标", "风险结构", "倍", "比率", "计算", formula="交易对手违约风险最低资本/认可资产", dependencies=("COUNTERPARTY_RISK_CAPITAL", "RECOGNIZED_ASSETS")),
+    MetricDefinition(
+        "INSURANCE_CONTRACT_LIABILITY_TO_TOTAL_LIABILITIES", "保险合同负债/总负债",
+        "经营指标", "业务质量指标", "倍", "比率", "计算",
+        formula="保险合同负债/(总资产-净资产)",
+        dependencies=("INSURANCE_CONTRACT_LIABILITY", "TOTAL_ASSETS", "NET_ASSETS"),
+        allowed_periods="本季度数|本年累计数|年度累计数|本季度末数",
+    ),
+    MetricDefinition(
+        "INSURANCE_REVENUE_TO_SIGNED_PREMIUM", "保险业务收入/签单保费",
+        "经营指标", "业务质量指标", "倍", "比率", "计算",
+        formula="保险业务收入/签单保费",
+        dependencies=("INSURANCE_REVENUE", "SIGNED_PREMIUM"),
+        allowed_periods="本季度数|本年累计数|年度累计数|本季度末数",
+    ),
+    MetricDefinition(
+        "NEW_BUSINESS_VALUE_RATE", "新业务价值率",
+        "经营指标", "业务质量指标", "倍", "比率", "计算",
+        formula="新业务价值/(签单保费-续期签单保费)",
+        dependencies=("NEW_BUSINESS_VALUE", "SIGNED_PREMIUM", "RENEWAL_PREMIUM"),
+        allowed_periods="本季度数|本年累计数|年度累计数|本季度末数",
+    ),
     MetricDefinition("TOTAL_ASSETS_TO_REGISTERED_CAPITAL", "总资产/注册资本", "派生指标", "资本结构", "倍", "比率", "计算", formula="总资产/注册资本", dependencies=("TOTAL_ASSETS", "REGISTERED_CAPITAL")),
 )
 
