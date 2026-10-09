@@ -212,6 +212,24 @@ class Step7QualityTests(unittest.TestCase):
         self.assertEqual(len(missing), 5)
         self.assertEqual(invalid, [])
 
+    def test_derived_rate_falls_back_to_precomputed_rate_when_renewal_missing(self):
+        # Renewal premium is only disclosed cumulatively, so the quarter-scope
+        # derivation cannot run; the pre-computed rate (already a percent in the
+        # Step 7 frame) should keep the line visible instead of dropping it.
+        frame = pd.DataFrame([
+            row("NEW_BUSINESS_VALUE", 20),
+            row("SIGNED_PREMIUM", 100),
+            row("RENEWAL_PREMIUM", 60, scope="本年累计数"),
+            row("NEW_BUSINESS_VALUE_RATE", 50.0, scope="本季度数"),
+        ])
+        figure, missing, invalid = combo_figure(
+            frame, ["2026Q2"], "NEW_BUSINESS_VALUE", "SIGNED_PREMIUM",
+            derived_rate=True, axes=[("2026Q2", "quarter")],
+        )
+        self.assertEqual(list(figure.data[1].y), [50.0])
+        self.assertEqual(missing, [])
+        self.assertEqual(invalid, [])
+
     def test_radar_uses_separate_three_year_codes(self):
         frame = pd.DataFrame([
             row("ROE", 5), row("ROA", 2),

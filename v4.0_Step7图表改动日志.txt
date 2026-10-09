@@ -1,0 +1,68 @@
+STEP7 报告图表三项改动日志
+========================================
+目标：针对 STEP7 公司报告与图表的三处问题进行优化——
+① 关键偿付数据概览的金额未随“显示单位”联动；
+② “新业务价值与新业务价值率”图中“新业务价值率”折线未显示；
+③ 所有折线图未按“每一期”标注最大值/最小值。
+
+一、关键偿付数据概览金额随“显示单位”联动
+1. dashboard_components.py
+   - 新增 CURRENCY_UNIT_IN_YUAN 货币单位换算表（元/万元/十万元/百万元/亿元/十亿元，以“元”为基准），
+     与 step7_solvency._convert_unit 的单位映射保持一致。
+   - 新增 _convert_overview_amounts(frame, unit_mode)：仅对“金额”类行（单位可换算为元）按目标单位缩放，
+     比率类行（%、倍等）保持不变。
+   - build_key_solvency_overview_table(data, *, unit_mode="")：新增 unit_mode 参数，
+     金额列（实际资本/保单未来盈余/认可负债余额）表头追加“（单位）”后缀，
+     并在透视前调用 _convert_overview_amounts 换算金额。
+   - render_key_solvency_overview(data, *, highlight_company="无", unit_mode="")：透传 unit_mode，
+     并在图注追加“金额单位：{unit_mode}。”。
+
+2. step7_solvency.py
+   - _render_combination_analysis 的 KEY_METRICS_TABLE 分支把 unit_mode 传给
+     render_key_solvency_overview，使关键偿付数据概览的金额随“公司级图表设置与图片覆盖”里的
+     “显示单位”下拉联动。
+
+3. tests/test_dashboard_components.py
+   - 新增 test_key_overview_amounts_convert_to_selected_unit：验证“万元→亿元”金额换算
+     （1,100,000 万元 → 110.0 亿元）及表头“实际资本（亿元）2025Q4”等单位后缀。
+
+二、修复“新业务价值率”折线未显示
+4. services/solvency_step7_quality.py
+   - combo_figure 的 derived_rate 分支：当“新业务价值 ÷（签单保费－续期签单保费）”直接推导
+     因缺少同口径的续期签单保费（RENEWAL_PREMIUM）而得到 None 时，回退读取标准化阶段
+     预计算好的 NEW_BUSINESS_VALUE_RATE（Step7 帧中已按百分数存储），避免折线整体消失。
+   - 重排 missing 提示逻辑：仅当折线率确实仍为 None 时才输出
+     “签单保费/续期签单保费（无法计算新业务价值率）”，回退成功时不再误报。
+
+5. tests/test_step7_quality.py
+   - 新增 test_derived_rate_falls_back_to_precomputed_rate_when_renewal_missing：
+     续期签单保费仅累计口径披露、当季口径缺失时，回退到预计算率并保持折线可见、不产生误报提示。
+
+三、所有折线图按“每一期”标注最大值/最小值
+6. services/solvency_step7_charts.py
+   - 新增 _extreme_value_labels(frame)：极值点标签统一按“x.xx% / x.xx‰”格式化
+     （百分数、千分数均保留两位小数）。
+   - _prepare_metric_trend：把原先的全局最大/最小值（是否全局最大/是否全局最小）
+     改为按报告期分组计算（是否期间最大/是否期间最小），并新增“极值标签”列；
+     阈值型标签分支（POLICY_SURPLUS_CORE_TO_CORE_CAPITAL）保持原有行为不变。
+   - _build_metric_trend_group：最大值标签（dy=-11）与最小值标签（dy=11, baseline="top"）
+     改用“极值标签”字段，并在高亮标签过滤中排除期间最大/最小点，避免重复标注。
+
+7. tests/test_step78_report_views.py
+   - 更新三处断言：是否全局最大/最小 → 是否期间最大/最小；
+     折线图最大/最小标签文本字段 数值标签 → 极值标签。
+
+四、测试结果
+   - services/solvency_step7_charts.py、services/solvency_step7_quality.py 均通过 py_compile。
+   - tests/test_step7_quality.py + tests/test_step7_quality_charts.py：37 passed, 1 skipped；
+     另有 4 个失败均为既有环境问题（已装 streamlit 1.45.1，而 requirements.txt 要求 1.59.2，
+     dashboard_components.py 使用 st.components.v2 导致 AttributeError），与本改动无关。
+   - 受 streamlit 版本差异影响无法本地跑的 test_step78_report_views.py 相关断言，
+     已通过独立脚本核对：折线图层 2 文本字段为“数值标签”、层 3/4 为“极值标签”，
+     千分数极值标签输出为“1.23‰”等两位小数格式。
+
+五、说明
+   - 三项改动互不干扰：改动 1 只影响“关键偿付数据概览”表；改动 2 只影响“新业务价值率”折线；
+     改动 3 只影响多公司折线图的极值标注。
+   - 改动 2 的回退读取依赖标准化阶段 append_derived_metrics 已计算 NEW_BUSINESS_VALUE_RATE
+     （include_derived 开启时）；未预计算时回退到直接推导，行为与改动前一致。

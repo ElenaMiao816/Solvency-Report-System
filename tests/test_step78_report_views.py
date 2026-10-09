@@ -1806,7 +1806,7 @@ show_step_7_solvency(frame)
         self.assertIn(".risk_ratio_zoom_brush", style_source)
         self.assertIn(".risk_ratio_zoom_brush_bg", style_source)
 
-    def test_policy_surplus_core_ratio_labels_only_values_above_point_four(self):
+    def test_policy_surplus_core_ratio_marks_period_max_and_min(self):
         rows = []
         values = {
             ("甲", "2025Q2"): 0.39,
@@ -1832,15 +1832,25 @@ show_step_7_solvency(frame)
         )
         spec = chart.to_dict(validate=True)
         dataset = spec["datasets"][spec["data"]["name"]]
-        flags = {round(float(row["数值"]), 6): row for row in dataset if row.get("数值") is not None}
-        self.assertFalse(flags[39.0]["显示标签"])
-        self.assertFalse(flags[40.0]["显示标签"])
-        self.assertTrue(flags[41.0]["显示标签"])
-        self.assertTrue(flags[55.0]["显示标签"])
-        self.assertEqual(flags[41.0]["数值标签"], "41.00%")
+        flags = {
+            (row["公司"], row["报告期"]): row
+            for row in dataset
+            if row.get("数值") is not None
+        }
+        self.assertTrue(flags[("乙", "2025Q2")]["是否期间最大"])
+        self.assertTrue(flags[("乙", "2025Q4")]["是否期间最大"])
+        self.assertFalse(flags[("甲", "2025Q2")]["是否期间最大"])
+        self.assertFalse(flags[("甲", "2025Q4")]["是否期间最大"])
+        self.assertTrue(flags[("甲", "2025Q2")]["是否期间最小"])
+        self.assertTrue(flags[("甲", "2025Q4")]["是否期间最小"])
+        self.assertFalse(flags[("乙", "2025Q2")]["是否期间最小"])
+        self.assertFalse(flags[("乙", "2025Q4")]["是否期间最小"])
+        # 追踪公司始终显示标签，其余仅在期间极值时显示
+        self.assertTrue(flags[("甲", "2025Q2")]["显示标签"])
+        self.assertTrue(flags[("乙", "2025Q2")]["显示标签"])
+        self.assertTrue(flags[("乙", "2025Q4")]["显示标签"])
+        self.assertEqual(flags[("乙", "2025Q2")]["数值标签"], "41.00%")
         self.assertTrue(all(row["单位"] == "%" for row in flags.values()))
-        self.assertTrue(all(not row["是否全局最大"] for row in flags.values()))
-        self.assertTrue(all(not row["是否全局最小"] for row in flags.values()))
 
     def test_policy_surplus_unavailable_details_include_company_period_and_reason(self):
         frame = pd.DataFrame([
@@ -2412,7 +2422,7 @@ show_step_7_solvency(frame)
             "甲",
         ).to_dict(validate=True)
         self.assertEqual(trend["layer"][0]["encoding"]["y"]["axis"]["format"], ",.1f")
-        self.assertEqual(trend["layer"][3]["encoding"]["text"]["field"], "数值标签")
+        self.assertEqual(trend["layer"][3]["encoding"]["text"]["field"], "极值标签")
         trend_dataset = trend["datasets"][trend["data"]["name"]]
         self.assertEqual(trend_dataset[0]["数值"], 31.0)
         self.assertEqual(trend_dataset[0]["数值标签"], "31.0%")
@@ -3085,10 +3095,14 @@ show_step_7_solvency(frame)
             {"甲": "#00338D", "乙": "#1E49E2"},
             "甲",
         ).to_dict(validate=True)
-        for layer_index in (2, 3, 4):
+        self.assertEqual(
+            spec["layer"][2]["encoding"]["text"]["field"],
+            "数值标签",
+        )
+        for layer_index in (3, 4):
             self.assertEqual(
                 spec["layer"][layer_index]["encoding"]["text"]["field"],
-                "数值标签",
+                "极值标签",
             )
         y_encoding = spec["layer"][0]["encoding"]["y"]
         self.assertEqual(y_encoding["axis"]["format"], ".5f")

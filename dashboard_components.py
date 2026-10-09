@@ -712,8 +712,44 @@ def calculate_industry_overview(
     )
 
 
+# Currency scales used to convert the key-overview amount columns into the
+# report unit selected in Step7's chart settings.  Values are expressed in
+# yuan and mirror the unit map used by ``step7_solvency._convert_unit``.
+CURRENCY_UNIT_IN_YUAN = {
+    "元": 1.0,
+    "万元": 10_000.0,
+    "十万元": 100_000.0,
+    "百万元": 1_000_000.0,
+    "亿元": 100_000_000.0,
+    "十亿元": 1_000_000_000.0,
+}
+
+
+def _convert_overview_amounts(frame: pd.DataFrame, unit_mode: str) -> pd.DataFrame:
+    """Scale currency-valued rows into ``unit_mode`` while leaving ratios intact."""
+    result = frame.copy()
+    if unit_mode not in CURRENCY_UNIT_IN_YUAN:
+        return result
+    target_yuan = CURRENCY_UNIT_IN_YUAN[unit_mode]
+    numeric = pd.to_numeric(result.get("数值"), errors="coerce")
+    unit_values = (
+        result["单位"].fillna("").astype(str).str.strip()
+        if "单位" in result.columns
+        else pd.Series("", index=result.index)
+    )
+    scales = unit_values.map(CURRENCY_UNIT_IN_YUAN)
+    amount_mask = scales.notna()
+    result["数值"] = numeric
+    result.loc[amount_mask, "数值"] = (
+        numeric.loc[amount_mask] * scales.loc[amount_mask] / target_yuan
+    )
+    return result
+
+
 def build_key_solvency_overview_table(
     data: pd.DataFrame | None,
+    *,
+    unit_mode: str = "",
 ) -> tuple[pd.DataFrame, str, str]:
     """Return the Excel-guide comparison using the prior-year matching period."""
     detail = company_detail_rows(data)
@@ -727,21 +763,22 @@ def build_key_solvency_overview_table(
             prior_period = prior_candidate
     latest_label = latest_period or "本期"
     prior_label = prior_period or "上年同期"
+    unit_suffix = f"（{unit_mode}）" if unit_mode in CURRENCY_UNIT_IN_YUAN else ""
     columns = [
         "公司名称",
         f"核心资本充足率{latest_label}",
         f"核心资本充足率{prior_label}",
         f"综合资本充足率{latest_label}",
         f"综合资本充足率{prior_label}",
-        f"实际资本{latest_label}",
-        f"实际资本{prior_label}",
-        f"保单未来盈余{latest_label}",
-        f"保单未来盈余{prior_label}",
+        f"实际资本{unit_suffix}{latest_label}",
+        f"实际资本{unit_suffix}{prior_label}",
+        f"保单未来盈余{unit_suffix}{latest_label}",
+        f"保单未来盈余{unit_suffix}{prior_label}",
         f"保单未来盈余/核心资本比例 {latest_label}",
         f"市场风险占比 {latest_label}",
         f"保险风险占比 {latest_label}",
-        f"认可负债余额{latest_label}",
-        f"认可负债余额{prior_label}",
+        f"认可负债余额{unit_suffix}{latest_label}",
+        f"认可负债余额{unit_suffix}{prior_label}",
     ]
     if detail.empty or not latest_period:
         return pd.DataFrame(columns=columns), latest_period, prior_period
@@ -765,6 +802,7 @@ def build_key_solvency_overview_table(
         ["公司", "报告期", "指标编码"],
         keep="first",
     )
+    selected = _convert_overview_amounts(selected, unit_mode)
     pivot = selected.pivot_table(
         index=["公司", "报告期"],
         columns="指标编码",
@@ -981,8 +1019,11 @@ def render_key_solvency_overview(
     data: pd.DataFrame | None,
     *,
     highlight_company: str = "无",
+    unit_mode: str = "",
 ) -> pd.DataFrame:
-    table, latest_period, prior_period = build_key_solvency_overview_table(data)
+    table, latest_period, prior_period = build_key_solvency_overview_table(
+        data, unit_mode=unit_mode
+    )
     if table.empty:
         st.info("当前数据没有可生成关键偿付数据概览的公司记录。")
         return table
@@ -998,8 +1039,14 @@ def render_key_solvency_overview(
         ),
         unsafe_allow_html=True,
     )
+    unit_note = (
+        f"金额单位：{unit_mode}。"
+        if unit_mode in CURRENCY_UNIT_IN_YUAN
+        else ""
+    )
     st.caption(
         f"比较期间：{prior_period or '缺少上期'} → {latest_period or '缺少本期'}；"
+        f"{unit_note}"
         "灰色“未披露”表示原始披露或派生指标不足，未以 0 替代。"
     )
     return table

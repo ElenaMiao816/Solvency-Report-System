@@ -289,17 +289,28 @@ def combo_figure(
                 rate = None
                 if new_business_premium == 0:
                     invalid.append(f"{label}：签单保费－续期签单保费为 0，新业务价值率无法计算")
+            if rate is None:
+                # Fall back to the pre-computed rate when the matching-scope
+                # components are incomplete (e.g. renewal premium disclosed only
+                # on a cumulative basis). The standardizer already applies
+                # cross-scope fallback and the Step 7 frame carries the rate as
+                # a percent, so reuse it rather than dropping the line.
+                stored_rate = scoped_value("NEW_BUSINESS_VALUE_RATE")
+                if stored_rate is not None:
+                    rate = stored_rate
         else:
             rate = scoped_value(line_code)
         bars.append(amount)
         lines.append(rate)
         if amount is None:
             missing.append(f"{label}：{METRIC_LABELS[bar_code]}")
-        if derived_rate and premium is None:
-            missing.append(f"{label}：签单保费（无法计算新业务价值率）")
-        if derived_rate and renewal is None:
-            missing.append(f"{label}：续期签单保费（无法计算新业务价值率）")
-        elif not derived_rate and rate is None:
+        if derived_rate:
+            if rate is None:
+                if premium is None:
+                    missing.append(f"{label}：签单保费（无法计算新业务价值率）")
+                if renewal is None:
+                    missing.append(f"{label}：续期签单保费（无法计算新业务价值率）")
+        elif rate is None:
             missing.append(f"{label}：{METRIC_LABELS[line_code]}")
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     fig.add_trace(go.Bar(x=labels, y=bars, marker_color=BLUE, name=METRIC_LABELS[bar_code], hovertemplate="%{x}<br>%{y:,.2f}<extra>%{fullData.name}</extra>"), secondary_y=False)

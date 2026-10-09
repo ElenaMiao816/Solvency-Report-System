@@ -267,6 +267,38 @@ class DashboardComponentTests(unittest.TestCase):
         self.assertIn(">130.0%</td>", result)
         self.assertIn(">110.00</td>", result)
 
+    def test_key_overview_amounts_convert_to_selected_unit(self):
+        rows = []
+        for period, actual_capital, recognized_liabilities in (
+            ("2025Q4", 1_100_000.0, 3_300_000.0),
+            ("2024Q4", 1_000_000.0, 3_000_000.0),
+        ):
+            metrics = {
+                "CORE_SOLVENCY_RATIO": 130.0,
+                "COMBINED_SOLVENCY_RATIO": 195.0,
+                "ACTUAL_CAPITAL": actual_capital,
+                "RECOGNIZED_LIABILITIES": recognized_liabilities,
+            }
+            for code, value in metrics.items():
+                rows.append({
+                    "公司": "甲人寿",
+                    "公司类型": "寿险",
+                    "报告期": period,
+                    "期间口径": "期末数",
+                    "指标编码": code,
+                    "数值": value,
+                    "单位": "%" if code in {"CORE_SOLVENCY_RATIO", "COMBINED_SOLVENCY_RATIO"} else "万元",
+                })
+        table, latest, prior = build_key_solvency_overview_table(
+            pd.DataFrame(rows), unit_mode="亿元"
+        )
+        self.assertEqual((latest, prior), ("2025Q4", "2024Q4"))
+        self.assertIn("实际资本（亿元）2025Q4", table.columns)
+        self.assertIn("认可负债余额（亿元）2024Q4", table.columns)
+        self.assertAlmostEqual(table.iloc[0]["实际资本（亿元）2025Q4"], 110.0)
+        self.assertAlmostEqual(table.iloc[0]["实际资本（亿元）2024Q4"], 100.0)
+        self.assertAlmostEqual(table.iloc[0]["认可负债余额（亿元）2025Q4"], 330.0)
+
     def test_profile_copy_changes_with_life_nonlife_and_annual_profiles(self):
         self.assertEqual(
             profile_platform_copy("LIFE_SOLVENCY", "寿险偿付能力季度报告", "QUARTERLY"),

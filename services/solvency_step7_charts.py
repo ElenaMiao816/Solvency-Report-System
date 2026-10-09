@@ -78,9 +78,6 @@ TREND_AXIS_FORMATS = {
         "LOSS_ABSORPTION_TO_QUANT_CAPITAL",
     )
 }
-TREND_LABEL_THRESHOLDS = {
-    "POLICY_SURPLUS_CORE_TO_CORE_CAPITAL": 40.0,
-}
 COMPACT_TREND_SCALE_CODES = {
     "NON_LIFE_INSURANCE_RISK_TO_LIABILITIES",
 }
@@ -251,6 +248,21 @@ def _with_metric_value_labels(frame: pd.DataFrame, code: str) -> pd.DataFrame:
         for value, unit in zip(numeric, units)
     ]
     return result
+
+
+def _extreme_value_labels(frame: pd.DataFrame) -> pd.Series:
+    """Format max/min point labels with two decimals for percent and per-mille."""
+    numeric = pd.to_numeric(frame.get("数值", pd.Series(dtype=float)), errors="coerce")
+    units = frame.get("单位", pd.Series("", index=frame.index)).fillna("").astype(str).str.strip()
+    return pd.Series(
+        [
+            ""
+            if pd.isna(value)
+            else f"{float(value):,.2f}{'%' if unit in {'%', '％'} else '‰' if unit == '‰' else ''}"
+            for value, unit in zip(numeric, units)
+        ],
+        index=frame.index,
+    )
 
 
 def _company_scale(
@@ -538,18 +550,18 @@ def _build_metric_trend_group(
         tooltip=["公司:N", "报告期:N", "指标名称:N", "披露状态:N", value_tooltip, "单位:N"],
     )
     highlight_labels = base.transform_filter(
-        alt.datum["显示标签"] & ~alt.datum["是否全局最大"] & ~alt.datum["是否全局最小"]
+        alt.datum["显示标签"] & ~alt.datum["是否期间最大"] & ~alt.datum["是否期间最小"]
     ).mark_text(tooltip=False, dy=-10, fontSize=10, fontWeight="bold", color="#0C233C").encode(
         x=alt.X("报告期:N", sort=periods),
         y=alt.Y("数值:Q"),
         text=alt.Text("数值标签:N"),
     )
-    max_labels = base.transform_filter(alt.datum["是否全局最大"]).mark_text(
+    max_labels = base.transform_filter(alt.datum["是否期间最大"]).mark_text(
         tooltip=False, dy=-11, fontSize=10, fontWeight="bold", color="#0C233C",
-    ).encode(x=alt.X("报告期:N", sort=periods), y="数值:Q", text=alt.Text("数值标签:N"))
-    min_labels = base.transform_filter(alt.datum["是否全局最小"]).mark_text(
+    ).encode(x=alt.X("报告期:N", sort=periods), y="数值:Q", text=alt.Text("极值标签:N"))
+    min_labels = base.transform_filter(alt.datum["是否期间最小"]).mark_text(
         tooltip=False, dy=11, baseline="top", fontSize=10, fontWeight="bold", color="#0C233C",
-    ).encode(x=alt.X("报告期:N", sort=periods), y="数值:Q", text=alt.Text("数值标签:N"))
+    ).encode(x=alt.X("报告期:N", sort=periods), y="数值:Q", text=alt.Text("极值标签:N"))
     trend_layers: list[alt.Chart] = [lines, points, highlight_labels, max_labels, min_labels]
     limit = REGULATORY_LIMITS.get(code)
     if limit is not None:
@@ -580,15 +592,14 @@ def _prepare_metric_trend(
     metric, periods, name = _metric_rows(frame, code, period_order)
     highlight = str(highlight_company or "").strip()
     metric["是否追踪"] = metric["公司"].astype(str).eq(highlight)
-    label_threshold = TREND_LABEL_THRESHOLDS.get(code)
-    if label_threshold is not None:
-        metric["是否全局最大"] = False
-        metric["是否全局最小"] = False
-        metric["显示标签"] = metric["数值"].gt(label_threshold).fillna(False)
-    else:
-        metric["是否全局最大"] = metric["数值"].eq(metric["数值"].max())
-        metric["是否全局最小"] = metric["数值"].eq(metric["数值"].min())
-        metric["显示标签"] = metric[["是否追踪", "是否全局最大", "是否全局最小"]].any(axis=1)
+    metric["是否期间最大"] = metric.groupby("报告期")["数值"].transform(
+        lambda series: series.eq(series.max())
+    )
+    metric["是否期间最小"] = metric.groupby("报告期")["数值"].transform(
+        lambda series: series.eq(series.min())
+    )
+    metric["显示标签"] = metric[["是否追踪", "是否期间最大", "是否期间最小"]].any(axis=1)
+    metric["极值标签"] = _extreme_value_labels(metric)
     return metric, periods, name, _trend_y_domain(metric, code)
 
 

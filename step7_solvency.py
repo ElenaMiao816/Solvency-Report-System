@@ -2324,7 +2324,11 @@ def _render_combination_analysis(
     """Render an approved multi-metric plan selected by chart name."""
     plan = chart_plan_for(chart_name)
     if plan.kind == KEY_METRICS_TABLE:
-        render_key_solvency_overview(frame, highlight_company=highlight_company)
+        render_key_solvency_overview(
+            frame,
+            highlight_company=highlight_company,
+            unit_mode=unit_mode,
+        )
         return
     if plan.kind == FINANCING_TABLE:
         render_major_financing(financing_data)
